@@ -11,19 +11,15 @@ export type Team9AccountConfig = {
   name?: string;
   /** Whether this account is enabled */
   enabled?: boolean;
-  /** Team9 server base URL (e.g., http://localhost:3000) */
+  /** Team9 server base URL (from TEAM9_BASE_URL env var) */
   baseUrl: string;
-  /** Team9 WebSocket URL (e.g., ws://localhost:3000/im) */
+  /** Team9 WebSocket URL (derived from baseUrl if not set) */
   wsUrl?: string;
-  /** JWT token for authentication */
-  token?: string;
-  /** User credentials for login */
+  /** Authentication credentials */
   credentials?: {
-    username: string;
-    password: string;
+    /** JWT token (from TEAM9_TOKEN env var) */
+    token: string;
   };
-  /** Default workspace ID */
-  workspaceId?: string;
   /** DM policy configuration */
   dm?: {
     policy?: "pairing" | "allow" | "deny";
@@ -37,15 +33,15 @@ export type Team9AccountConfig = {
 
 export type Team9Config = {
   enabled?: boolean;
-  /** Default account configuration (for single-account usage) */
+  /** Server base URL (from TEAM9_BASE_URL env var) */
   baseUrl?: string;
+  /** WebSocket URL (derived from baseUrl if not set) */
   wsUrl?: string;
-  token?: string;
+  /** Authentication credentials */
   credentials?: {
-    username: string;
-    password: string;
+    /** JWT token (from TEAM9_TOKEN env var) */
+    token: string;
   };
-  workspaceId?: string;
   /** Multiple accounts */
   accounts?: Record<string, Team9AccountConfig>;
   /** DM policy */
@@ -61,12 +57,8 @@ export type ResolvedTeam9Account = {
   enabled: boolean;
   baseUrl: string;
   wsUrl: string;
+  /** JWT token for authentication */
   token?: string;
-  credentials?: {
-    username: string;
-    password: string;
-  };
-  workspaceId?: string;
   dmPolicy: "pairing" | "allow" | "deny";
   allowFrom: string[];
   channelAllowlist: string[];
@@ -129,12 +121,6 @@ export type CreateMessageDto = {
     mimeType: string;
     url: string;
   }>;
-};
-
-export type Team9AuthResponse = {
-  accessToken: string;
-  refreshToken: string;
-  user: Team9User;
 };
 
 // ==================== WebSocket Event Types ====================

@@ -41,7 +41,7 @@ export function listTeam9AccountIds(cfg: OpenClawConfig): string[] {
 
   // Add default account if configured at root level
   if (
-    (team9Config.baseUrl || team9Config.token) &&
+    (team9Config.baseUrl || team9Config.credentials?.token) &&
     !accountIds.includes(DEFAULT_ACCOUNT_ID)
   ) {
     accountIds.unshift(DEFAULT_ACCOUNT_ID);
@@ -87,19 +87,11 @@ export function resolveTeam9Account(params: {
     process.env.TEAM9_WS_URL ??
     `${baseUrl.replace(/^http/, "ws")}/im`;
 
+  // Token from credentials (env var TEAM9_TOKEN takes priority)
   const token =
-    accountConfig?.token ??
-    (isDefault ? team9Config?.token : undefined) ??
-    process.env.TEAM9_TOKEN;
-
-  const credentials =
-    accountConfig?.credentials ??
-    (isDefault ? team9Config?.credentials : undefined);
-
-  const workspaceId =
-    accountConfig?.workspaceId ??
-    (isDefault ? team9Config?.workspaceId : undefined) ??
-    process.env.TEAM9_WORKSPACE_ID;
+    process.env.TEAM9_TOKEN ??
+    accountConfig?.credentials?.token ??
+    (isDefault ? team9Config?.credentials?.token : undefined);
 
   const dmPolicy =
     accountConfig?.dm?.policy ??
@@ -123,8 +115,6 @@ export function resolveTeam9Account(params: {
     baseUrl,
     wsUrl,
     token,
-    credentials,
-    workspaceId,
     dmPolicy,
     allowFrom,
     channelAllowlist,
@@ -137,11 +127,8 @@ export function resolveTeam9Account(params: {
 export function isTeam9AccountConfigured(
   account: ResolvedTeam9Account
 ): boolean {
-  // Either token or credentials must be present
-  return Boolean(
-    account.token ||
-      (account.credentials?.username && account.credentials?.password)
-  );
+  // Token must be present (from env var or config)
+  return Boolean(account.token);
 }
 
 /**
@@ -154,7 +141,6 @@ export function describeTeam9Account(account: ResolvedTeam9Account): {
   configured: boolean;
   baseUrl: string;
   hasToken: boolean;
-  hasCredentials: boolean;
 } {
   return {
     accountId: account.accountId,
@@ -163,7 +149,6 @@ export function describeTeam9Account(account: ResolvedTeam9Account): {
     configured: isTeam9AccountConfigured(account),
     baseUrl: account.baseUrl,
     hasToken: Boolean(account.token),
-    hasCredentials: Boolean(account.credentials?.username),
   };
 }
 
@@ -177,9 +162,6 @@ export function applyTeam9AccountConfig(params: {
     baseUrl?: string;
     wsUrl?: string;
     token?: string;
-    username?: string;
-    password?: string;
-    workspaceId?: string;
   };
 }): OpenClawConfig {
   const { cfg, accountId, input } = params;
@@ -196,12 +178,9 @@ export function applyTeam9AccountConfig(params: {
           enabled: true,
           baseUrl: input.baseUrl ?? cfg.channels?.team9?.baseUrl,
           wsUrl: input.wsUrl ?? cfg.channels?.team9?.wsUrl,
-          token: input.token ?? cfg.channels?.team9?.token,
-          credentials:
-            input.username && input.password
-              ? { username: input.username, password: input.password }
-              : cfg.channels?.team9?.credentials,
-          workspaceId: input.workspaceId ?? cfg.channels?.team9?.workspaceId,
+          credentials: input.token
+            ? { token: input.token }
+            : cfg.channels?.team9?.credentials,
         },
       },
     };
@@ -223,12 +202,9 @@ export function applyTeam9AccountConfig(params: {
             accountId,
             baseUrl: input.baseUrl ?? existingAccount.baseUrl,
             wsUrl: input.wsUrl ?? existingAccount.wsUrl,
-            token: input.token ?? existingAccount.token,
-            credentials:
-              input.username && input.password
-                ? { username: input.username, password: input.password }
-                : existingAccount.credentials,
-            workspaceId: input.workspaceId ?? existingAccount.workspaceId,
+            credentials: input.token
+              ? { token: input.token }
+              : existingAccount.credentials,
           },
         },
       },

@@ -189,24 +189,14 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     return existing;
   }
 
-  // Create new connection
+  // Token is required (from env var TEAM9_TOKEN or config)
+  if (!account.token) {
+    throw new Error("No token available for Team9 connection. Set TEAM9_TOKEN env var.");
+  }
+
+  // Create new connection with token
   const api = new Team9ApiClient(account.baseUrl, account.token);
-
-  // If no token but have credentials, login first
-  if (!account.token && account.credentials) {
-    const authResult = await api.login(
-      account.credentials.username,
-      account.credentials.password
-    );
-    console.log(`[Team9] Logged in as: ${authResult.user.username}`);
-    // Store bot user ID to filter out self-messages
-    currentBotUserId = authResult.user.id;
-  }
-
-  const token = api.getToken();
-  if (!token) {
-    throw new Error("No token available for Team9 connection");
-  }
+  const token = account.token;
 
   const ws = createTeam9WsClient(
     { ...account, token },

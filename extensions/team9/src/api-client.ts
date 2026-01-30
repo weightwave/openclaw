@@ -5,7 +5,6 @@
  */
 
 import type {
-  Team9AuthResponse,
   Team9Channel,
   Team9Message,
   Team9User,
@@ -15,19 +14,11 @@ import type {
 
 export class Team9ApiClient {
   private baseUrl: string;
-  private token: string | null = null;
+  private token: string;
 
-  constructor(baseUrl: string, token?: string) {
+  constructor(baseUrl: string, token: string) {
     this.baseUrl = baseUrl.replace(/\/$/, ""); // Remove trailing slash
-    this.token = token ?? null;
-  }
-
-  setToken(token: string): void {
     this.token = token;
-  }
-
-  getToken(): string | null {
-    return this.token;
   }
 
   private async fetch<T>(
@@ -40,9 +31,7 @@ export class Team9ApiClient {
       ...(options.headers as Record<string, string>),
     };
 
-    if (this.token) {
-      headers["Authorization"] = `Bearer ${this.token}`;
-    }
+    headers["Authorization"] = `Bearer ${this.token}`;
 
     const response = await fetch(url, {
       ...options,
@@ -59,16 +48,7 @@ export class Team9ApiClient {
     return response.json() as Promise<T>;
   }
 
-  // ==================== Authentication ====================
-
-  async login(email: string, password: string): Promise<Team9AuthResponse> {
-    const response = await this.fetch<Team9AuthResponse>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    });
-    this.token = response.accessToken;
-    return response;
-  }
+  // ==================== Users ====================
 
   async getMe(): Promise<Team9User> {
     return this.fetch<Team9User>("/users/me");
