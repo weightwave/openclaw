@@ -96,7 +96,7 @@ export function resolveTeam9Account(params: {
   const dmPolicy =
     accountConfig?.dm?.policy ??
     team9Config?.dm?.policy ??
-    "pairing";
+    "allow";
 
   const allowFrom =
     accountConfig?.dm?.allowFrom ??

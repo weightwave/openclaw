@@ -225,7 +225,7 @@ export const team9OnboardingAdapter: ChannelOnboardingAdapter = {
       const team9 = (cfg.channels as Record<string, unknown>)?.team9 as
         | { dm?: { policy?: "pairing" | "allow" | "deny" } }
         | undefined;
-      return team9?.dm?.policy ?? "pairing";
+      return team9?.dm?.policy ?? "allow";
     },
     setPolicy: (cfg, policy) => ({
       ...cfg,
