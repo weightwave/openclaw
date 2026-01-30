@@ -31,15 +31,33 @@ import { team9OnboardingAdapter } from "./onboarding.js";
  *
  * For DM chats: uses senderId to isolate per user
  * For group chats: uses channelId to isolate per group
+ *
+ * When accountId is provided (multi-bot mode), it's included in the agentId
+ * to ensure different bots route to different OpenClaw agents:
+ * - Single bot: team9-user-{senderId}
+ * - Multi bot:  team9-{accountId}-user-{senderId}
  */
-function generateTeam9AgentId(params: { senderId: string; channelId: string; isGroup: boolean }): string {
+function generateTeam9AgentId(params: {
+  senderId: string;
+  channelId: string;
+  isGroup: boolean;
+  accountId?: string;
+}): string {
   // For group chats, use channelId so all group members share context
   // For DM chats, use senderId so each user has their own context
   const identifier = params.isGroup ? params.channelId : params.senderId;
   // Sanitize to be safe for use in file paths
   const sanitized = identifier.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
-  const prefix = params.isGroup ? "team9-group" : "team9-user";
-  return `${prefix}-${sanitized}`;
+  const chatType = params.isGroup ? "group" : "user";
+
+  // Include accountId in agentId for multi-bot scenarios
+  // Skip if accountId is "default" (single-bot mode)
+  if (params.accountId && params.accountId !== "default") {
+    const sanitizedAccount = params.accountId.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
+    return `team9-${sanitizedAccount}-${chatType}-${sanitized}`;
+  }
+
+  return `team9-${chatType}-${sanitized}`;
 }
 
 /**
@@ -100,10 +118,12 @@ async function handleIncomingMessage(
   // Generate per-user/group agent ID for workspace isolation
   // Each user gets their own agent with isolated workspace at ~/clawd-team9-user-{senderId}
   // Each group gets shared agent with workspace at ~/clawd-team9-group-{channelId}
+  // When using multiple bot accounts, accountId is included to route to different agents
   const agentId = generateTeam9AgentId({
     senderId: message.senderId,
     channelId: message.channelId,
     isGroup: message.isGroup,
+    accountId: account.accountId,
   });
 
   // Build session key with isolated agent
