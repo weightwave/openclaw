@@ -1,0 +1,20 @@
+{
+  "id": "team9",
+  "channels": [
+    "team9"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "Team9 server base URL"
+      },
+      "wsUrl": {
+        "type": "string",
+        "description": "Team9 WebSocket URL"
+      }
+    }
+  }
+}

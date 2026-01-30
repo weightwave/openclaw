@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/team9",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OpenClaw Team9 channel plugin - integrates Team9 IM platform",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "socket.io-client": "^4.7.0"
+  }
+}
