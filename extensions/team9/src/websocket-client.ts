@@ -32,6 +32,7 @@ export class Team9WebSocketClient {
   private maxReconnectAttempts = 5;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private isConnected = false;
+  private channelTypes = new Map<string, "direct" | "public" | "private">();
 
   constructor(options: Team9WsClientOptions) {
     this.options = options;
@@ -67,7 +68,11 @@ export class Team9WebSocketClient {
         });
 
         this.socket.once("auth_error", (error: { message: string }) => {
-          console.error(`[Team9 WS] Auth error: ${error.message}`);
+          console.error(
+            `[Team9 WS] Auth error: ${error.message}. ` +
+            `Verify that TEAM9_TOKEN is a valid bot access token (t9bot_...) ` +
+            `and has not been revoked.`,
+          );
           reject(new Error(`Authentication failed: ${error.message}`));
         });
 
@@ -106,6 +111,10 @@ export class Team9WebSocketClient {
     // Channel events - auto-join new channels (e.g., when someone starts a DM)
     this.socket.on("channel_created", (channel: { id: string; name?: string; type?: string }) => {
       console.log(`[Team9 WS] New channel created: ${channel.id} (${channel.type || 'unknown'})`);
+      // Cache channel type for isGroup determination
+      if (channel.type === "direct" || channel.type === "public" || channel.type === "private") {
+        this.channelTypes.set(channel.id, channel.type);
+      }
       // Auto-join the channel to receive messages
       this.joinChannel(channel.id);
     });
@@ -189,7 +198,7 @@ export class Team9WebSocketClient {
       timestamp: new Date(message.createdAt),
       parentId: message.parentId,
       attachments: message.attachments,
-      isGroup: true, // Team9 channels are always group-like
+      isGroup: this.channelTypes.get(message.channelId) !== "direct",
     };
 
     this.options.onMessage?.(incomingMessage);
@@ -212,6 +221,14 @@ export class Team9WebSocketClient {
   }
 
   // ==================== Channel Operations ====================
+
+  /**
+   * Cache the type of a channel for isGroup determination.
+   * Call this after fetching channel metadata from the API.
+   */
+  setChannelType(channelId: string, type: "direct" | "public" | "private"): void {
+    this.channelTypes.set(channelId, type);
+  }
 
   joinChannel(channelId: string): void {
     if (!this.socket || !this.isConnected) {

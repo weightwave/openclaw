@@ -12,6 +12,22 @@ import type {
   ResolvedTeam9Account,
 } from "./types.js";
 
+/**
+ * Error thrown when Team9 API returns 401 or 403.
+ * Callers can check `instanceof Team9AuthError` to handle auth failures specifically.
+ */
+export class Team9AuthError extends Error {
+  public readonly statusCode: number;
+  public readonly statusText: string;
+
+  constructor(statusCode: number, statusText: string, detail: string) {
+    super(`Team9 auth error (${statusCode}): ${detail}`);
+    this.name = "Team9AuthError";
+    this.statusCode = statusCode;
+    this.statusText = statusText;
+  }
+}
+
 export class Team9ApiClient {
   private baseUrl: string;
   private token: string;
@@ -40,6 +56,14 @@ export class Team9ApiClient {
 
     if (!response.ok) {
       const errorText = await response.text();
+      if (response.status === 401 || response.status === 403) {
+        throw new Team9AuthError(
+          response.status,
+          response.statusText,
+          errorText ||
+            "Authentication failed. Check that TEAM9_TOKEN is a valid bot access token (t9bot_...).",
+        );
+      }
       throw new Error(
         `Team9 API error: ${response.status} ${response.statusText} - ${errorText}`
       );
@@ -173,5 +197,11 @@ export class Team9ApiClient {
 
 // Factory function
 export function createTeam9ApiClient(account: ResolvedTeam9Account): Team9ApiClient {
+  if (!account.token) {
+    throw new Error(
+      "Cannot create Team9 API client: no bot access token available. " +
+      "Set the TEAM9_TOKEN environment variable or configure credentials in config.",
+    );
+  }
   return new Team9ApiClient(account.baseUrl, account.token);
 }

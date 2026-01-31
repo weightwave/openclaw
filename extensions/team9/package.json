@@ -6,7 +6,21 @@
   "openclaw": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "channel": {
+      "id": "team9",
+      "label": "Team9",
+      "selectionLabel": "Team9 (IM Platform)",
+      "docsPath": "/channels/team9",
+      "docsLabel": "team9",
+      "blurb": "Team9 instant messaging platform integration.",
+      "order": 70
+    },
+    "install": {
+      "npmSpec": "@openclaw/team9",
+      "localPath": "extensions/team9",
+      "defaultChoice": "local"
+    }
   },
   "dependencies": {
     "socket.io-client": "^4.7.0"

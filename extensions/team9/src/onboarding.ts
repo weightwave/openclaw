@@ -5,7 +5,7 @@
  *
  * Configuration is primarily done via environment variables:
  * - TEAM9_BASE_URL: Server base URL
- * - TEAM9_TOKEN: JWT token for authentication
+ * - TEAM9_TOKEN: Bot access token for authentication (t9bot_...)
  */
 
 import type {
@@ -33,7 +33,7 @@ async function noteTeam9Setup(prompter: WizardPrompter): Promise<void> {
       "Team9 is configured via environment variables:",
       "",
       "  TEAM9_BASE_URL - Server URL (e.g., http://localhost:3000)",
-      "  TEAM9_TOKEN    - JWT token for authentication",
+      "  TEAM9_TOKEN    - Bot access token (t9bot_...)",
       "",
       "These are typically set by the control plane when creating instances.",
     ].join("\n"),
@@ -157,8 +157,15 @@ export const team9OnboardingAdapter: ChannelOnboardingAdapter = {
     // Prompt for manual token entry (fallback)
     const token = String(
       await prompter.text({
-        message: "Enter JWT token (or set TEAM9_TOKEN env var)",
-        validate: (value) => (value?.trim() ? undefined : "Required"),
+        message: "Enter bot access token (or set TEAM9_TOKEN env var)",
+        validate: (value) => {
+          if (!value?.trim()) return "Required";
+          const trimmed = value.trim();
+          if (!trimmed.startsWith("t9bot_")) {
+            return "Token should start with 't9bot_'. Check that you're using a bot access token, not a user JWT.";
+          }
+          return undefined;
+        },
       })
     ).trim();
 
@@ -223,9 +230,9 @@ export const team9OnboardingAdapter: ChannelOnboardingAdapter = {
     allowFromKey: "channels.team9.dm.allowFrom",
     getCurrent: (cfg) => {
       const team9 = (cfg.channels as Record<string, unknown>)?.team9 as
-        | { dm?: { policy?: "pairing" | "allow" | "deny" } }
+        | { dm?: { policy?: "pairing" | "allowlist" | "open" | "disabled" } }
         | undefined;
-      return team9?.dm?.policy ?? "allow";
+      return team9?.dm?.policy ?? "pairing";
     },
     setPolicy: (cfg, policy) => ({
       ...cfg,

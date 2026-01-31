@@ -8,9 +8,71 @@ import type {
   Team9Config,
   Team9AccountConfig,
   ResolvedTeam9Account,
+  Team9TokenSource,
 } from "./types.js";
 
 const DEFAULT_ACCOUNT_ID = "default";
+
+/** Bot access token prefix used by Team9 server */
+const TEAM9_BOT_TOKEN_PREFIX = "t9bot_";
+
+/**
+ * Normalize and validate a Team9 bot access token.
+ * Expected format: "t9bot_" prefix + 96 hex characters.
+ * Returns the trimmed token if non-empty, undefined otherwise.
+ * Logs a warning if the format does not match the expected bot token pattern.
+ */
+export function normalizeTeam9Token(raw?: string | null): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (!trimmed.startsWith(TEAM9_BOT_TOKEN_PREFIX)) {
+    console.warn(
+      `[Team9] Token does not start with '${TEAM9_BOT_TOKEN_PREFIX}'. ` +
+      `Expected a bot access token (t9bot_...), got prefix '${trimmed.slice(0, 6)}...'. ` +
+      `If this is intentional (e.g. test/mock token), you can ignore this warning.`,
+    );
+  }
+  return trimmed;
+}
+
+export type Team9TokenResolution = {
+  token: string;
+  source: Team9TokenSource;
+};
+
+/**
+ * Resolve the Team9 bot access token from config or env.
+ * Priority: account-specific config → root config → env var (default account only).
+ */
+export function resolveTeam9Token(
+  cfg: OpenClawConfig | undefined,
+  opts: { accountId?: string | null } = {},
+): Team9TokenResolution {
+  const team9Config = cfg ? getTeam9Config(cfg) : undefined;
+  const resolvedAccountId = opts.accountId ?? DEFAULT_ACCOUNT_ID;
+  const isDefault = resolvedAccountId === DEFAULT_ACCOUNT_ID;
+
+  // 1. Account-specific config token
+  const accountToken = normalizeTeam9Token(
+    team9Config?.accounts?.[resolvedAccountId]?.credentials?.token,
+  );
+  if (accountToken) return { token: accountToken, source: "config" };
+
+  // 2. Root-level config token (only for default account)
+  if (isDefault) {
+    const configToken = normalizeTeam9Token(team9Config?.credentials?.token);
+    if (configToken) return { token: configToken, source: "config" };
+  }
+
+  // 3. Environment variable (only for default account)
+  if (isDefault) {
+    const envToken = normalizeTeam9Token(process.env.TEAM9_TOKEN);
+    if (envToken) return { token: envToken, source: "env" };
+  }
+
+  return { token: "", source: "none" };
+}
 
 type OpenClawConfig = {
   channels?: {
@@ -87,16 +149,16 @@ export function resolveTeam9Account(params: {
     process.env.TEAM9_WS_URL ??
     `${baseUrl.replace(/^http/, "ws")}/im`;
 
-  // Token from credentials (env var TEAM9_TOKEN takes priority)
-  const token =
-    process.env.TEAM9_TOKEN ??
-    accountConfig?.credentials?.token ??
-    (isDefault ? team9Config?.credentials?.token : undefined);
+  // Resolve token using the standard resolution pattern
+  const tokenResolution = resolveTeam9Token(cfg, { accountId: resolvedAccountId });
 
-  const dmPolicy =
+  // Resolve DM policy with legacy migration ("allow" → "open", "deny" → "disabled")
+  let rawPolicy: string | undefined =
     accountConfig?.dm?.policy ??
-    team9Config?.dm?.policy ??
-    "allow";
+    team9Config?.dm?.policy;
+  if (rawPolicy === "allow") rawPolicy = "open";
+  if (rawPolicy === "deny") rawPolicy = "disabled";
+  const dmPolicy = (rawPolicy as ResolvedTeam9Account["dmPolicy"]) ?? "pairing";
 
   const allowFrom =
     accountConfig?.dm?.allowFrom ??
@@ -114,7 +176,8 @@ export function resolveTeam9Account(params: {
     enabled,
     baseUrl,
     wsUrl,
-    token,
+    token: tokenResolution.token || undefined,
+    tokenSource: tokenResolution.source,
     dmPolicy,
     allowFrom,
     channelAllowlist,
@@ -141,6 +204,7 @@ export function describeTeam9Account(account: ResolvedTeam9Account): {
   configured: boolean;
   baseUrl: string;
   hasToken: boolean;
+  tokenSource: Team9TokenSource;
 } {
   return {
     accountId: account.accountId,
@@ -149,6 +213,7 @@ export function describeTeam9Account(account: ResolvedTeam9Account): {
     configured: isTeam9AccountConfigured(account),
     baseUrl: account.baseUrl,
     hasToken: Boolean(account.token),
+    tokenSource: account.tokenSource,
   };
 }
 

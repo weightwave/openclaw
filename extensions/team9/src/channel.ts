@@ -21,7 +21,7 @@ import {
   applyTeam9AccountConfig,
 } from "./config.js";
 import { getTeam9Runtime } from "./runtime.js";
-import { Team9ApiClient } from "./api-client.js";
+import { Team9ApiClient, Team9AuthError } from "./api-client.js";
 import { Team9WebSocketClient, createTeam9WsClient } from "./websocket-client.js";
 import { team9OnboardingAdapter } from "./onboarding.js";
 
@@ -234,6 +234,8 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
           const channels = await api.getUserChannels();
           console.log(`[Team9] Joining ${channels.length} existing channels...`);
           for (const channel of channels) {
+            // Cache channel type for isGroup determination in incoming messages
+            ws.setChannelType(channel.id, channel.type);
             ws.joinChannel(channel.id);
           }
           console.log(`[Team9] Joined all channels successfully`);
@@ -250,7 +252,18 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     }
   );
 
-  await ws.connect();
+  try {
+    await ws.connect();
+  } catch (err) {
+    if (err instanceof Team9AuthError) {
+      console.error(
+        `[Team9] Authentication failed for account ${account.accountId}. ` +
+        `Token source: ${account.tokenSource}. ` +
+        `Verify your bot access token is valid and not revoked.`,
+      );
+    }
+    throw err;
+  }
 
   const connection = { api, ws };
   activeConnections.set(account.accountId, connection);
@@ -582,7 +595,7 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         return;
       }
 
-      console.log(`[Team9] Starting account: ${account.accountId}`);
+      console.log(`[Team9] Starting account: ${account.accountId} (token source: ${account.tokenSource})`);
 
       try {
         await getConnection(account, cfg);
@@ -631,6 +644,7 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
       enabled: account.enabled,
       configured: isTeam9AccountConfigured(account),
       connected: activeConnections.get(account.accountId)?.ws.isActive() ?? false,
+      tokenSource: account.tokenSource,
     }),
   },
 };

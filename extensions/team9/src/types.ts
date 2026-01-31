@@ -2,6 +2,11 @@
  * Team9 Channel Plugin Types
  */
 
+// ==================== Token Types ====================
+
+/** Source from which the bot access token was resolved */
+export type Team9TokenSource = "env" | "config" | "none";
+
 // ==================== Configuration Types ====================
 
 export type Team9AccountConfig = {
@@ -17,12 +22,12 @@ export type Team9AccountConfig = {
   wsUrl?: string;
   /** Authentication credentials */
   credentials?: {
-    /** JWT token (from TEAM9_TOKEN env var) */
+    /** Bot access token (from TEAM9_TOKEN env var) */
     token: string;
   };
   /** DM policy configuration */
   dm?: {
-    policy?: "pairing" | "allow" | "deny";
+    policy?: "pairing" | "allowlist" | "open" | "disabled";
     allowFrom?: string[];
   };
   /** Allowed channels */
@@ -39,14 +44,14 @@ export type Team9Config = {
   wsUrl?: string;
   /** Authentication credentials */
   credentials?: {
-    /** JWT token (from TEAM9_TOKEN env var) */
+    /** Bot access token (from TEAM9_TOKEN env var) */
     token: string;
   };
   /** Multiple accounts */
   accounts?: Record<string, Team9AccountConfig>;
   /** DM policy */
   dm?: {
-    policy?: "pairing" | "allow" | "deny";
+    policy?: "pairing" | "allowlist" | "open" | "disabled";
     allowFrom?: string[];
   };
 };
@@ -57,9 +62,11 @@ export type ResolvedTeam9Account = {
   enabled: boolean;
   baseUrl: string;
   wsUrl: string;
-  /** JWT token for authentication */
+  /** Bot access token for authentication */
   token?: string;
-  dmPolicy: "pairing" | "allow" | "deny";
+  /** Where the token was resolved from */
+  tokenSource: Team9TokenSource;
+  dmPolicy: "pairing" | "allowlist" | "open" | "disabled";
   allowFrom: string[];
   channelAllowlist: string[];
 };
