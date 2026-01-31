@@ -229,6 +229,10 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
         console.log(`[Team9] WebSocket connected for account: ${account.accountId}`);
       },
       onAuthenticated: async (userId) => {
+        // Store bot's user ID for self-message filtering
+        currentBotUserId = userId;
+        console.log(`[Team9] Bot user ID set to: ${userId}`);
+
         // Join all existing channels to receive messages
         try {
           const channels = await api.getUserChannels();
