@@ -20,6 +20,7 @@ import {
   getDefaultTeam9AccountId,
   resolveTeam9Account,
   isTeam9AccountConfigured,
+  applyTeam9AccountConfig,
 } from "./config.js";
 
 const channel = "team9" as const;
@@ -154,6 +155,29 @@ export const team9OnboardingAdapter: ChannelOnboardingAdapter = {
     // Show setup instructions
     await noteTeam9Setup(prompter);
 
+    // Prompt for base URL
+    const currentBaseUrl =
+      resolvedAccount.baseUrl !== "http://localhost:3000"
+        ? resolvedAccount.baseUrl
+        : undefined;
+    const baseUrl = String(
+      await prompter.text({
+        message: "Team9 server URL (or set TEAM9_BASE_URL env var)",
+        placeholder: "http://localhost:3000",
+        initialValue: currentBaseUrl,
+        validate: (value) => {
+          if (!value?.trim()) return "Required";
+          const trimmed = value.trim();
+          try {
+            new URL(trimmed);
+          } catch {
+            return "Must be a valid URL (e.g., http://localhost:3000)";
+          }
+          return undefined;
+        },
+      })
+    ).trim();
+
     // Prompt for manual token entry (fallback)
     const token = String(
       await prompter.text({
@@ -170,41 +194,11 @@ export const team9OnboardingAdapter: ChannelOnboardingAdapter = {
     ).trim();
 
     // Apply configuration
-    const team9Config: Record<string, unknown> = {
-      ...((next.channels as Record<string, unknown>)?.team9 as Record<
-        string,
-        unknown
-      >),
-      enabled: true,
-    };
-
-    if (accountId === DEFAULT_ACCOUNT_ID) {
-      // Apply to root level
-      team9Config.credentials = { token };
-    } else {
-      // Apply to named account
-      const existingAccounts =
-        (team9Config.accounts as Record<string, unknown>) ?? {};
-      const existingAccount =
-        (existingAccounts[accountId] as Record<string, unknown>) ?? {};
-
-      team9Config.accounts = {
-        ...existingAccounts,
-        [accountId]: {
-          ...existingAccount,
-          enabled: true,
-          credentials: { token },
-        },
-      };
-    }
-
-    next = {
-      ...next,
-      channels: {
-        ...next.channels,
-        team9: team9Config,
-      },
-    };
+    next = applyTeam9AccountConfig({
+      cfg: next,
+      accountId,
+      input: { baseUrl, token },
+    });
 
     return { cfg: next, accountId };
   },
