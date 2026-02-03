@@ -21,6 +21,7 @@ export type Team9WsClientOptions = {
   onMessage?: Team9MessageHandler;
   onConnect?: () => void;
   onAuthenticated?: (userId: string) => void;
+  onChannelJoined?: (channelId: string) => void;
   onDisconnect?: (reason: string) => void;
   onError?: (error: Error) => void;
 };
@@ -89,6 +90,13 @@ export class Team9WebSocketClient {
   private setupEventHandlers(): void {
     if (!this.socket) return;
 
+    // Debug: log ALL socket.io events to diagnose missing messages
+    this.socket.onAny((eventName: string, ...args: unknown[]) => {
+      if (eventName === "pong" || eventName === "user_online" || eventName === "user_offline") return;
+      const preview = args.length > 0 ? JSON.stringify(args[0]).substring(0, 200) : "";
+      console.log(`[Team9 WS DEBUG] Event: ${eventName} ${preview}`);
+    });
+
     // Connection events
     this.socket.on("connect", () => {
       console.log(`[Team9 WS] Connected to server`);
@@ -117,6 +125,15 @@ export class Team9WebSocketClient {
       }
       // Auto-join the channel to receive messages
       this.joinChannel(channel.id);
+    });
+
+    // Handle being added to an existing channel (e.g., bot invited to a public channel)
+    this.socket.on("channel_joined", (data: { channelId: string; userId: string; username: string }) => {
+      console.log(`[Team9 WS] User ${data.username} joined channel: ${data.channelId}`);
+      // Auto-join the socket.io room so we receive messages from this channel
+      this.joinChannel(data.channelId);
+      // Notify caller to fetch and cache channel metadata
+      this.options.onChannelJoined?.(data.channelId);
     });
 
     // Message events
@@ -301,6 +318,7 @@ export function createTeam9WsClient(
     onMessage?: Team9MessageHandler;
     onConnect?: () => void;
     onAuthenticated?: (userId: string) => void;
+    onChannelJoined?: (channelId: string) => void;
     onDisconnect?: (reason: string) => void;
     onError?: (error: Error) => void;
   }
