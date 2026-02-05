@@ -1,0 +1,54 @@
+{
+  "id": "capability-hub-bridge",
+  "name": "Capability Hub Bridge",
+  "description": "Dynamically discovers and bridges tools from a Capability-Hub instance, enabling OpenClaw agents to use external capabilities like Twitter, GitHub, Slack, and more.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "Capability-Hub API base URL (e.g., http://localhost:3000/api)"
+      },
+      "authToken": {
+        "type": "string",
+        "description": "Authentication token for Capability-Hub API. Will be sent as Bearer token in Authorization header."
+      },
+      "filter": {
+        "type": "object",
+        "description": "Optional filters for tool discovery",
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Only discover tools with these tags (e.g., [\"twitter\", \"social-media\"])"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["active", "inactive"],
+            "description": "Filter by capability status (default: active)"
+          }
+        }
+      },
+      "timeout": {
+        "type": "number",
+        "description": "Default timeout in milliseconds for tool invocations (default: 15000)"
+      },
+      "cache": {
+        "type": "object",
+        "description": "Caching options for discovered tools",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable local caching of discovered tools (default: false)"
+          },
+          "ttlMs": {
+            "type": "number",
+            "description": "Cache time-to-live in milliseconds (default: 300000 = 5 minutes)"
+          }
+        }
+      }
+    },
+    "required": ["baseUrl"]
+  }
+}

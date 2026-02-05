@@ -264,6 +264,8 @@ importers:
 
   extensions/bluebubbles: {}
 
+  extensions/capability-hub-bridge: {}
+
   extensions/copilot-proxy: {}
 
   extensions/diagnostics-otel:

@@ -1,0 +1,18 @@
+{
+  "name": "@openclaw/capability-hub-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Bridge plugin that dynamically discovers and exposes tools from Capability-Hub to OpenClaw agents",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "capability-hub",
+    "tools",
+    "bridge"
+  ]
+}
