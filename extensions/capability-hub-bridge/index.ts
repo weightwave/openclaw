@@ -131,7 +131,7 @@ export default function register(api: OpenClawPluginApi) {
       return {
         name: "capability_hub_invoke",
         label: "Capability Hub Invoke",
-        description: `Invoke tools from Capability-Hub at ${baseUrl}. Use this to call external capabilities like Twitter, GitHub, Slack, etc. First use capability_hub_list to see available tools, then invoke them by name.`,
+        description: `Invoke tools from Capability-Hub at ${baseUrl}. Use this to call external capabilities like Twitter, Web Search, etc. First use capability_hub_list to see available tools, then invoke them by name.`,
         parameters: {
           type: "object",
           properties: {
