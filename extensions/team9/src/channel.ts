@@ -73,8 +73,22 @@ function buildTeam9SessionKey(params: {
   return `agent:${params.agentId}:team9:${peerKind}:${params.channelId}`.toLowerCase();
 }
 
-// Store current bot user ID to filter out self-messages
+// Store current bot user ID to filter out self-messages and detect mentions
 let currentBotUserId: string | null = null;
+
+/**
+ * Check if the bot was mentioned in the raw message content.
+ * Team9 mention format: <mention data-user-id="{userId}" ...>@&lt;{userId}&gt;</mention>
+ */
+function isBotMentioned(rawContent: string, botUserId: string | null): boolean {
+  if (!botUserId) return false;
+  // Structured mention tag: <mention data-user-id="botUserId">
+  if (rawContent.includes(`data-user-id="${botUserId}"`)) return true;
+  // Text mention formats
+  if (rawContent.includes(`@&lt;${botUserId}&gt;`)) return true;
+  if (rawContent.includes(`@<${botUserId}>`)) return true;
+  return false;
+}
 
 // Store active connections per account
 const activeConnections = new Map<
@@ -110,6 +124,11 @@ async function handleIncomingMessage(
     .trim();
 
   if (!plainContent) {
+    return;
+  }
+
+  // In group chats, only respond when the bot is explicitly @mentioned
+  if (message.isGroup && !isBotMentioned(message.content, currentBotUserId)) {
     return;
   }
 
