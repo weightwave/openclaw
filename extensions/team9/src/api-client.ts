@@ -75,7 +75,7 @@ export class Team9ApiClient {
   // ==================== Users ====================
 
   async getMe(): Promise<Team9User> {
-    return this.fetch<Team9User>("/users/me");
+    return this.fetch<Team9User>("/auth/me");
   }
 
   // ==================== Channels ====================

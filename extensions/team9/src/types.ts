@@ -34,6 +34,14 @@ export type Team9AccountConfig = {
   channels?: {
     allowlist?: string[];
   };
+  /** Per-channel group configuration. Key is channel ID or "*" for default. */
+  groups?: Record<string, Team9GroupConfig>;
+};
+
+/** Per-channel group mention configuration */
+export type Team9GroupConfig = {
+  /** Require mentioning the bot to trigger replies in this channel. Default: true. */
+  requireMention?: boolean;
 };
 
 export type Team9Config = {
@@ -54,6 +62,8 @@ export type Team9Config = {
     policy?: "pairing" | "allowlist" | "open" | "disabled";
     allowFrom?: string[];
   };
+  /** Per-channel group configuration. Key is channel ID or "*" for default. */
+  groups?: Record<string, Team9GroupConfig>;
 };
 
 export type ResolvedTeam9Account = {

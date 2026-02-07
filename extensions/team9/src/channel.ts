@@ -11,6 +11,7 @@
  */
 
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
+import { resolveMentionGatingWithBypass } from "openclaw/plugin-sdk";
 import type { ResolvedTeam9Account, Team9IncomingMessage } from "./types.js";
 import {
   listTeam9AccountIds,
@@ -24,6 +25,7 @@ import { getTeam9Runtime } from "./runtime.js";
 import { Team9ApiClient, Team9AuthError } from "./api-client.js";
 import { Team9WebSocketClient, createTeam9WsClient } from "./websocket-client.js";
 import { team9OnboardingAdapter } from "./onboarding.js";
+import { resolveTeam9GroupRequireMention } from "./group-mentions.js";
 
 /**
  * Generate a unique agent ID for a Team9 user.
@@ -75,6 +77,8 @@ function buildTeam9SessionKey(params: {
 
 // Store current bot user ID to filter out self-messages
 let currentBotUserId: string | null = null;
+// Store bot username for mention detection in group messages
+let currentBotUsername: string | null = null;
 
 // Store active connections per account
 const activeConnections = new Map<
@@ -104,16 +108,27 @@ async function handleIncomingMessage(
     return;
   }
 
-  // Strip HTML tags from content for plain text processing
+  // Extract mentioned user IDs from Team9 <mention> HTML tags before stripping
+  const mentionedUserIds = new Set<string>();
+  const mentionTagRegex = /<mention\s[^>]*data-user-id="([^"]+)"[^>]*>/gi;
+  let mentionMatch: RegExpExecArray | null;
+  while ((mentionMatch = mentionTagRegex.exec(message.content)) !== null) {
+    mentionedUserIds.add(mentionMatch[1]);
+  }
+
+  // Strip HTML tags and decode HTML entities for plain text processing
   const plainContent = message.content
     .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
     .trim();
 
   if (!plainContent) {
     return;
   }
-
-  console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
 
   // Generate per-user/group agent ID for workspace isolation
   // Each user gets their own agent with isolated workspace at ~/clawd-team9-user-{senderId}
@@ -125,6 +140,73 @@ async function handleIncomingMessage(
     isGroup: message.isGroup,
     accountId: account.accountId,
   });
+
+  // ===== Mention-based filtering for group messages =====
+  let effectiveWasMentioned: boolean | undefined;
+
+  if (message.isGroup) {
+    // Resolve requireMention setting for this channel
+    const requireMention = resolveTeam9GroupRequireMention({
+      cfg,
+      groupId: message.channelId,
+      groupChannel: message.channelId,
+      accountId: account.accountId,
+    });
+
+    // Build mention regexes from agent identity/config
+    const mentionRegexes = runtime.channel.mentions.buildMentionRegexes(cfg, agentId);
+
+    // Detect explicit @-mention of the bot using extracted HTML mention tags
+    const explicitlyMentioned = Boolean(
+      currentBotUserId && mentionedUserIds.has(currentBotUserId),
+    );
+    const hasAnyMention = mentionedUserIds.size > 0 || /@\w+/.test(plainContent);
+
+    // Use core mention pattern matching with explicit signal
+    const wasMentioned = runtime.channel.mentions.matchesMentionWithExplicit({
+      text: plainContent,
+      mentionRegexes,
+      explicit: {
+        hasAnyMention,
+        isExplicitlyMentioned: explicitlyMentioned,
+        canResolveExplicit: Boolean(currentBotUserId || currentBotUsername),
+      },
+    });
+
+    console.log(
+      `[Team9] Mention check: rawContent=${JSON.stringify(message.content.substring(0, 100))}, ` +
+      `plainContent=${JSON.stringify(plainContent.substring(0, 100))}, ` +
+      `botUserId=${currentBotUserId}, botUsername=${currentBotUsername}, ` +
+      `requireMention=${requireMention}, explicitlyMentioned=${explicitlyMentioned}, ` +
+      `hasAnyMention=${hasAnyMention}, wasMentioned=${wasMentioned}, ` +
+      `mentionRegexCount=${mentionRegexes.length}`,
+    );
+
+    // Resolve mention gating (allows control commands to bypass mention requirement)
+    const canDetectMention = Boolean(currentBotUserId || currentBotUsername) || mentionRegexes.length > 0;
+    const mentionGate = resolveMentionGatingWithBypass({
+      isGroup: true,
+      requireMention,
+      canDetectMention,
+      wasMentioned,
+      implicitMention: false,
+      hasAnyMention,
+      allowTextCommands: runtime.channel.commands.shouldHandleTextCommands({ cfg, surface: "team9" }),
+      hasControlCommand: runtime.channel.text.hasControlCommand(plainContent, cfg),
+      commandAuthorized: true,
+    });
+
+    if (mentionGate.shouldSkip) {
+      console.log(
+        `[Team9] Skipping group message in channel ${message.channelId} (mention required but not mentioned)`,
+      );
+      return;
+    }
+
+    effectiveWasMentioned = mentionGate.effectiveWasMentioned;
+  }
+
+  console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
 
   // Build session key with isolated agent
   const sessionKey = buildTeam9SessionKey({
@@ -159,6 +241,7 @@ async function handleIncomingMessage(
     MessageSid: message.messageId,
     Timestamp: message.timestamp.getTime(),
     CommandAuthorized: true, // Allow commands from Team9
+    WasMentioned: message.isGroup ? effectiveWasMentioned : undefined,
     OriginatingChannel: "team9" as const,
     OriginatingTo: to,
   });
@@ -233,11 +316,21 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
         currentBotUserId = userId;
         console.log(`[Team9] Bot user ID set to: ${userId}`);
 
+        // Fetch bot user profile for mention detection in group messages
+        try {
+          const me = await api.getMe();
+          currentBotUsername = me.username ?? null;
+          console.log(`[Team9] Bot username: ${me.username}, displayName: ${me.displayName ?? "none"}`);
+        } catch (err) {
+          console.warn(`[Team9] Failed to fetch bot user profile, mention detection may be limited:`, err);
+        }
+
         // Join all existing channels to receive messages
         try {
           const channels = await api.getUserChannels();
           console.log(`[Team9] Joining ${channels.length} existing channels...`);
           for (const channel of channels) {
+            console.log(`[Team9]   -> channel: ${channel.id} type=${channel.type} name=${channel.name}`);
             // Cache channel type for isGroup determination in incoming messages
             ws.setChannelType(channel.id, channel.type);
             ws.joinChannel(channel.id);
@@ -245,6 +338,16 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
           console.log(`[Team9] Joined all channels successfully`);
         } catch (err) {
           console.error(`[Team9] Failed to join existing channels:`, err);
+        }
+      },
+      onChannelJoined: async (channelId) => {
+        // Fetch channel metadata to cache the type for isGroup determination
+        try {
+          const channel = await api.getChannel(channelId);
+          ws.setChannelType(channel.id, channel.type);
+          console.log(`[Team9] Cached channel type for ${channelId}: ${channel.type}`);
+        } catch (err) {
+          console.error(`[Team9] Failed to fetch channel metadata for ${channelId}:`, err);
         }
       },
       onDisconnect: (reason) => {
@@ -421,6 +524,12 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         },
       };
     },
+  },
+
+  // ==================== Groups (mention gating) ====================
+
+  groups: {
+    resolveRequireMention: resolveTeam9GroupRequireMention,
   },
 
   // ==================== Security ====================
