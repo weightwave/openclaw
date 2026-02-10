@@ -1,12 +1,11 @@
 /**
  * Team9 Channel Plugin
  *
- * Implements the ChannelPlugin interface for Team9 integration
+ * Implements the ChannelPlugin interface for Team9 integration.
  *
- * Workspace & Session Model:
- * All users on the same bot account share a single workspace (IDENTITY.md, SOUL.md, etc.).
- * Conversation sessions are isolated per channel/DM via distinct session keys.
- * In multi-bot mode, each bot account gets its own workspace.
+ * Agent routing is handled by the core framework via resolveAgentRoute().
+ * By default all messages go to the default agent. Use `openclaw agent add --bind team9`
+ * to route Team9 messages to a dedicated agent with its own workspace.
  */
 
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
@@ -26,33 +25,6 @@ import { Team9WebSocketClient, createTeam9WsClient } from "./websocket-client.js
 import { team9OnboardingAdapter } from "./onboarding.js";
 import { resolveTeam9GroupRequireMention } from "./group-mentions.js";
 
-/**
- * Generate a unique agent ID for a Team9 bot account.
- * All users on the same bot share one workspace; sessions are isolated by session key.
- *
- * - Single bot (accountId "default"): agentId = "team9"
- * - Multi bot: agentId = "team9-{accountId}"
- */
-function generateTeam9AgentId(accountId?: string): string {
-  if (accountId && accountId !== "default") {
-    const sanitized = accountId.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
-    return `team9-${sanitized}`;
-  }
-  return "team9";
-}
-
-/**
- * Build a session key for Team9 with per-user/group agent isolation.
- * Format: agent:{agentId}:team9:{peerKind}:{channelId}
- */
-function buildTeam9SessionKey(params: {
-  agentId: string;
-  channelId: string;
-  isGroup: boolean;
-}): string {
-  const peerKind = params.isGroup ? "group" : "dm";
-  return `agent:${params.agentId}:team9:${peerKind}:${params.channelId}`.toLowerCase();
-}
 
 // Store current bot user ID to filter out self-messages and detect mentions
 let currentBotUserId: string | null = null;
@@ -130,8 +102,14 @@ async function handleIncomingMessage(
 
   console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
 
-  // Generate agent ID per bot account — all users on the same bot share one workspace
-  const agentId = generateTeam9AgentId(account.accountId);
+  // Route to agent via core framework (respects bindings from `openclaw agent add --bind team9`)
+  const route = runtime.channel.routing.resolveAgentRoute({
+    cfg,
+    channel: "team9",
+    accountId: account.accountId,
+    peer: { kind: message.isGroup ? "group" : "dm", id: message.channelId },
+  });
+  const agentId = route.agentId;
 
   // ===== Mention-based filtering for group messages =====
   let effectiveWasMentioned: boolean | undefined;
@@ -200,14 +178,9 @@ async function handleIncomingMessage(
 
   console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
 
-  // Build session key with isolated agent
-  const sessionKey = buildTeam9SessionKey({
-    agentId,
-    channelId: message.channelId,
-    isGroup: message.isGroup,
-  });
+  const sessionKey = route.sessionKey;
 
-  console.log(`[Team9] Session isolation: agentId=${agentId}, sessionKey=${sessionKey}`);
+  console.log(`[Team9] Routed: agentId=${agentId}, matchedBy=${route.matchedBy}, sessionKey=${sessionKey}`);
 
   // Build the message context
   const fromLabel = message.isGroup
