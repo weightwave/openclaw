@@ -3,16 +3,15 @@
  *
  * Implements the ChannelPlugin interface for Team9 integration
  *
- * Session Isolation:
- * Each Team9 user gets their own isolated agent with a separate workspace.
- * This ensures conversation context (IDENTITY.md, SOUL.md, USER.md) is not shared
- * between users. The agentId is generated as `team9-user-{senderId}` and the
- * workspace is automatically created at `~/clawd-team9-user-{senderId}`.
+ * Workspace & Session Model:
+ * All users on the same bot account share a single workspace (IDENTITY.md, SOUL.md, etc.).
+ * Conversation sessions are isolated per channel/DM via distinct session keys.
+ * In multi-bot mode, each bot account gets its own workspace.
  */
 
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
-import { resolveMentionGatingWithBypass } from "openclaw/plugin-sdk";
-import type { ResolvedTeam9Account, Team9IncomingMessage } from "./types.js";
+import { resolveMentionGatingWithBypass, jsonResult, readStringParam } from "openclaw/plugin-sdk";
+import type { ResolvedTeam9Account, Team9Config, Team9IncomingMessage } from "./types.js";
 import {
   listTeam9AccountIds,
   resolveTeam9Account,
@@ -28,38 +27,18 @@ import { team9OnboardingAdapter } from "./onboarding.js";
 import { resolveTeam9GroupRequireMention } from "./group-mentions.js";
 
 /**
- * Generate a unique agent ID for a Team9 user.
- * This ensures each user gets their own isolated workspace at ~/clawd-{agentId}.
+ * Generate a unique agent ID for a Team9 bot account.
+ * All users on the same bot share one workspace; sessions are isolated by session key.
  *
- * For DM chats: uses senderId to isolate per user
- * For group chats: uses channelId to isolate per group
- *
- * When accountId is provided (multi-bot mode), it's included in the agentId
- * to ensure different bots route to different OpenClaw agents:
- * - Single bot: team9-user-{senderId}
- * - Multi bot:  team9-{accountId}-user-{senderId}
+ * - Single bot (accountId "default"): agentId = "team9"
+ * - Multi bot: agentId = "team9-{accountId}"
  */
-function generateTeam9AgentId(params: {
-  senderId: string;
-  channelId: string;
-  isGroup: boolean;
-  accountId?: string;
-}): string {
-  // For group chats, use channelId so all group members share context
-  // For DM chats, use senderId so each user has their own context
-  const identifier = params.isGroup ? params.channelId : params.senderId;
-  // Sanitize to be safe for use in file paths
-  const sanitized = identifier.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
-  const chatType = params.isGroup ? "group" : "user";
-
-  // Include accountId in agentId for multi-bot scenarios
-  // Skip if accountId is "default" (single-bot mode)
-  if (params.accountId && params.accountId !== "default") {
-    const sanitizedAccount = params.accountId.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
-    return `team9-${sanitizedAccount}-${chatType}-${sanitized}`;
+function generateTeam9AgentId(accountId?: string): string {
+  if (accountId && accountId !== "default") {
+    const sanitized = accountId.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
+    return `team9-${sanitized}`;
   }
-
-  return `team9-${chatType}-${sanitized}`;
+  return "team9";
 }
 
 /**
@@ -151,16 +130,8 @@ async function handleIncomingMessage(
 
   console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
 
-  // Generate per-user/group agent ID for workspace isolation
-  // Each user gets their own agent with isolated workspace at ~/clawd-team9-user-{senderId}
-  // Each group gets shared agent with workspace at ~/clawd-team9-group-{channelId}
-  // When using multiple bot accounts, accountId is included to route to different agents
-  const agentId = generateTeam9AgentId({
-    senderId: message.senderId,
-    channelId: message.channelId,
-    isGroup: message.isGroup,
-    accountId: account.accountId,
-  });
+  // Generate agent ID per bot account — all users on the same bot share one workspace
+  const agentId = generateTeam9AgentId(account.accountId);
 
   // ===== Mention-based filtering for group messages =====
   let effectiveWasMentioned: boolean | undefined;
@@ -416,7 +387,7 @@ async function sendTeam9Message(
 }> {
   try {
     const runtime = getTeam9Runtime();
-    const cfg = runtime.config.get();
+    const cfg = runtime.config.loadConfig();
     const account = resolveTeam9Account({
       cfg,
       accountId: options?.accountId,
@@ -495,7 +466,7 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
     describeAccount: (account) => describeTeam9Account(account),
 
     setAccountEnabled: ({ cfg, accountId, enabled }) => {
-      const team9Config = cfg.channels?.team9;
+      const team9Config = cfg.channels?.team9 as Team9Config | undefined;
       if (!team9Config) return cfg;
 
       if (accountId === "default") {
@@ -530,7 +501,7 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
     },
 
     deleteAccount: ({ cfg, accountId }) => {
-      const team9Config = cfg.channels?.team9;
+      const team9Config = cfg.channels?.team9 as Team9Config | undefined;
       if (!team9Config?.accounts) return cfg;
 
       const { [accountId]: _, ...remainingAccounts } = team9Config.accounts;
@@ -568,14 +539,14 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
   setup: {
     validateInput: ({ input }) => {
-      if (!input.baseUrl && !input.token && !input.username) {
-        return "Team9 requires either baseUrl+token or credentials (username/password)";
+      if (!input.url && !input.token) {
+        return "Team9 requires a server URL and bot token";
       }
       return null;
     },
 
     applyAccountConfig: ({ cfg, accountId, input }) =>
-      applyTeam9AccountConfig({ cfg, accountId, input }),
+      applyTeam9AccountConfig({ cfg, accountId, input: { baseUrl: input.url, token: input.token } }),
   },
 
   // ==================== Message Sending ====================
@@ -591,8 +562,10 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         replyTo: replyToId ?? undefined,
       });
       return {
-        channel: "team9",
-        ...result,
+        channel: "team9" as const,
+        messageId: result.messageId ?? "",
+        status: result.status,
+        error: result.error,
       };
     },
 
@@ -605,8 +578,10 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         replyTo: replyToId ?? undefined,
       });
       return {
-        channel: "team9",
-        ...result,
+        channel: "team9" as const,
+        messageId: result.messageId ?? "",
+        status: result.status,
+        error: result.error,
       };
     },
   },
@@ -646,72 +621,42 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
   // ==================== Actions ====================
 
   actions: {
-    editMessage: async ({ messageId, text, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
+    listActions: () => {
+      return ["send", "edit", "delete", "react"];
+    },
 
+    handleAction: async ({ action, params, cfg, accountId }) => {
+      const account = resolveTeam9Account({ cfg, accountId });
+      const { api } = await getConnection(account, cfg);
+
+      if (action === "edit") {
+        const messageId = readStringParam(params, "messageId", { required: true, label: "messageId" });
+        const text = readStringParam(params, "text", { required: true, label: "text" });
         await api.updateMessage(messageId, text);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return jsonResult({ ok: true, edited: messageId });
       }
-    },
 
-    deleteMessage: async ({ messageId, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
-
+      if (action === "delete") {
+        const messageId = readStringParam(params, "messageId", { required: true, label: "messageId" });
         await api.deleteMessage(messageId);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return jsonResult({ ok: true, deleted: messageId });
       }
-    },
 
-    addReaction: async ({ messageId, emoji, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
+      if (action === "react") {
+        const messageId = readStringParam(params, "messageId", { required: true, label: "messageId" });
+        const emoji = readStringParam(params, "emoji", { required: true, label: "emoji" });
+        const remove = typeof params.remove === "boolean" ? params.remove : false;
+
+        if (remove) {
+          await api.removeReaction(messageId, emoji);
+          return jsonResult({ ok: true, removed: emoji });
+        }
 
         await api.addReaction(messageId, emoji);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return jsonResult({ ok: true, added: emoji });
       }
-    },
 
-    removeReaction: async ({ messageId, emoji, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
-
-        await api.removeReaction(messageId, emoji);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
+      throw new Error(`Action ${action} not supported for team9.`);
     },
   },
 

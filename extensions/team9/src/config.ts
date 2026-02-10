@@ -4,6 +4,7 @@
  * Handles configuration parsing and account resolution
  */
 
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type {
   Team9Config,
   Team9AccountConfig,
@@ -74,17 +75,12 @@ export function resolveTeam9Token(
   return { token: "", source: "none" };
 }
 
-type OpenClawConfig = {
-  channels?: {
-    team9?: Team9Config;
-  };
-};
 
 /**
  * Get Team9 config from OpenClaw config
  */
 export function getTeam9Config(cfg: OpenClawConfig): Team9Config | undefined {
-  return cfg.channels?.team9;
+  return (cfg.channels as Record<string, unknown> | undefined)?.team9 as Team9Config | undefined;
 }
 
 /**
@@ -231,6 +227,7 @@ export function applyTeam9AccountConfig(params: {
 }): OpenClawConfig {
   const { cfg, accountId, input } = params;
   const isDefault = accountId === DEFAULT_ACCOUNT_ID;
+  const team9Config = getTeam9Config(cfg);
 
   if (isDefault) {
     // Apply to root level
@@ -239,29 +236,29 @@ export function applyTeam9AccountConfig(params: {
       channels: {
         ...cfg.channels,
         team9: {
-          ...cfg.channels?.team9,
+          ...team9Config,
           enabled: true,
-          baseUrl: input.baseUrl ?? cfg.channels?.team9?.baseUrl,
-          wsUrl: input.wsUrl ?? cfg.channels?.team9?.wsUrl,
+          baseUrl: input.baseUrl ?? team9Config?.baseUrl,
+          wsUrl: input.wsUrl ?? team9Config?.wsUrl,
           credentials: input.token
             ? { token: input.token }
-            : cfg.channels?.team9?.credentials,
+            : team9Config?.credentials,
         },
       },
     };
   }
 
   // Apply to named account
-  const existingAccount = cfg.channels?.team9?.accounts?.[accountId] ?? {};
+  const existingAccount: Partial<Team9AccountConfig> = team9Config?.accounts?.[accountId] ?? {};
   return {
     ...cfg,
     channels: {
       ...cfg.channels,
       team9: {
-        ...cfg.channels?.team9,
+        ...team9Config,
         enabled: true,
         accounts: {
-          ...cfg.channels?.team9?.accounts,
+          ...team9Config?.accounts,
           [accountId]: {
             ...existingAccount,
             accountId,
