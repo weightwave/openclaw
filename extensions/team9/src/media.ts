@@ -64,12 +64,13 @@ async function resolveAttachmentUrl(
   attachment: Team9MessageAttachment,
   api: Team9ApiClient,
 ): Promise<string> {
-  if (attachment.fileUrl) {
-    return attachment.fileUrl;
-  }
+  // Prefer presigned URL via fileKey (works with private S3/MinIO buckets)
   if (attachment.fileKey) {
     const result = await api.getFileDownloadUrl(attachment.fileKey);
     return result.url;
+  }
+  if (attachment.fileUrl) {
+    return attachment.fileUrl;
   }
   // Legacy fallback
   if (attachment.url) {
