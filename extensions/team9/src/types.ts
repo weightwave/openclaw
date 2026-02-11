@@ -105,9 +105,15 @@ export type Team9Channel = {
 export type Team9MessageAttachment = {
   id: string;
   fileName: string;
+  fileKey: string;
+  fileUrl: string;
   fileSize: number;
   mimeType: string;
-  url: string;
+  thumbnailUrl?: string | null;
+  width?: number | null;
+  height?: number | null;
+  /** @deprecated Use fileUrl instead */
+  url?: string;
 };
 
 export type Team9Message = {
@@ -115,7 +121,7 @@ export type Team9Message = {
   channelId: string;
   senderId: string;
   content: string;
-  type: "text" | "file" | "system";
+  type: "text" | "file" | "image" | "system";
   parentId?: string;
   isPinned: boolean;
   createdAt: string;
@@ -129,15 +135,41 @@ export type Team9Message = {
   }>;
 };
 
+/** Attachment descriptor for outbound messages (after upload) */
+export type Team9OutboundAttachment = {
+  fileKey: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+};
+
 export type CreateMessageDto = {
   content: string;
   parentId?: string;
-  attachments?: Array<{
-    fileName: string;
-    fileSize: number;
-    mimeType: string;
-    url: string;
-  }>;
+  attachments?: Team9OutboundAttachment[];
+};
+
+// ==================== File API Types ====================
+
+export type Team9PresignedUploadCredentials = {
+  url: string;
+  fields: Record<string, string>;
+  key: string;
+  bucket: string;
+  expiresAt: string;
+  publicUrl: string;
+};
+
+export type Team9ConfirmUploadResult = {
+  key: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+};
+
+export type Team9DownloadUrlResult = {
+  url: string;
+  expiresAt: string;
 };
 
 // ==================== WebSocket Event Types ====================

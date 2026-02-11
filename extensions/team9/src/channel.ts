@@ -9,8 +9,8 @@
  */
 
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
-import { resolveMentionGatingWithBypass, jsonResult, readStringParam } from "openclaw/plugin-sdk";
-import type { ResolvedTeam9Account, Team9Config, Team9IncomingMessage } from "./types.js";
+import { jsonResult, readStringParam } from "openclaw/plugin-sdk";
+import type { ResolvedTeam9Account, Team9Config, Team9OutboundAttachment } from "./types.js";
 import {
   listTeam9AccountIds,
   resolveTeam9Account,
@@ -21,235 +21,28 @@ import {
 } from "./config.js";
 import { getTeam9Runtime } from "./runtime.js";
 import { Team9ApiClient, Team9AuthError } from "./api-client.js";
-import { Team9WebSocketClient, createTeam9WsClient } from "./websocket-client.js";
+import { createTeam9WsClient } from "./websocket-client.js";
+import type { Team9WebSocketClient } from "./websocket-client.js";
 import { team9OnboardingAdapter } from "./onboarding.js";
 import { resolveTeam9GroupRequireMention } from "./group-mentions.js";
+import { uploadMediaToTeam9 } from "./media.js";
+import { createTeam9MonitorContext } from "./monitor/context.js";
+import type { Team9MonitorContext } from "./monitor/context.js";
+import { createTeam9MessageHandler } from "./monitor/message-handler.js";
 
-
-// Store current bot user ID to filter out self-messages and detect mentions
-let currentBotUserId: string | null = null;
-// Store bot username for mention detection in group messages
-let currentBotUsername: string | null = null;
-
-/**
- * Check if the bot was mentioned in the raw message content.
- * Team9 mention format: <mention data-user-id="{userId}" ...>@&lt;{userId}&gt;</mention>
- */
-function isBotMentioned(rawContent: string, botUserId: string | null): boolean {
-  if (!botUserId) return false;
-  // Structured mention tag: <mention data-user-id="botUserId">
-  if (rawContent.includes(`data-user-id="${botUserId}"`)) return true;
-  // Text mention formats
-  if (rawContent.includes(`@&lt;${botUserId}&gt;`)) return true;
-  if (rawContent.includes(`@<${botUserId}>`)) return true;
-  return false;
-}
-
-// Store active connections per account
+// Store active connections per account (with monitor context)
 const activeConnections = new Map<
   string,
   {
     api: Team9ApiClient;
     ws: Team9WebSocketClient;
+    monitorCtx: Team9MonitorContext;
   }
 >();
 
 /**
- * Handle incoming message from Team9 and route to OpenClaw agent
- *
- * Uses per-user/group agent isolation to ensure each user has their own
- * workspace and conversation context.
- */
-async function handleIncomingMessage(
-  message: Team9IncomingMessage,
-  account: ResolvedTeam9Account,
-  api: Team9ApiClient,
-  cfg: OpenClawConfig
-): Promise<void> {
-  const runtime = getTeam9Runtime();
-
-  // Skip messages from self (the bot)
-  if (currentBotUserId && message.senderId === currentBotUserId) {
-    return;
-  }
-
-  // Extract mentioned user IDs from Team9 <mention> HTML tags before stripping
-  const mentionedUserIds = new Set<string>();
-  const mentionTagRegex = /<mention\s[^>]*data-user-id="([^"]+)"[^>]*>/gi;
-  let mentionMatch: RegExpExecArray | null;
-  while ((mentionMatch = mentionTagRegex.exec(message.content)) !== null) {
-    mentionedUserIds.add(mentionMatch[1]);
-  }
-
-  // Strip HTML tags and decode HTML entities for plain text processing
-  const plainContent = message.content
-    .replace(/<[^>]*>/g, "")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .trim();
-
-  if (!plainContent) {
-    return;
-  }
-
-  // In group chats, only respond when the bot is explicitly @mentioned
-  if (message.isGroup && !isBotMentioned(message.content, currentBotUserId)) {
-    return;
-  }
-
-  console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
-
-  // Route to agent via core framework (respects bindings from `openclaw agent add --bind team9`)
-  const route = runtime.channel.routing.resolveAgentRoute({
-    cfg,
-    channel: "team9",
-    accountId: account.accountId,
-    peer: { kind: message.isGroup ? "group" : "dm", id: message.channelId },
-  });
-  const agentId = route.agentId;
-
-  // ===== Mention-based filtering for group messages =====
-  let effectiveWasMentioned: boolean | undefined;
-
-  if (message.isGroup) {
-    // Resolve requireMention setting for this channel
-    const requireMention = resolveTeam9GroupRequireMention({
-      cfg,
-      groupId: message.channelId,
-      groupChannel: message.channelId,
-      accountId: account.accountId,
-    });
-
-    // Build mention regexes from agent identity/config
-    const mentionRegexes = runtime.channel.mentions.buildMentionRegexes(cfg, agentId);
-
-    // Detect explicit @-mention of the bot using extracted HTML mention tags
-    const explicitlyMentioned = Boolean(
-      currentBotUserId && mentionedUserIds.has(currentBotUserId),
-    );
-    const hasAnyMention = mentionedUserIds.size > 0 || /@\w+/.test(plainContent);
-
-    // Use core mention pattern matching with explicit signal
-    const wasMentioned = runtime.channel.mentions.matchesMentionWithExplicit({
-      text: plainContent,
-      mentionRegexes,
-      explicit: {
-        hasAnyMention,
-        isExplicitlyMentioned: explicitlyMentioned,
-        canResolveExplicit: Boolean(currentBotUserId || currentBotUsername),
-      },
-    });
-
-    console.log(
-      `[Team9] Mention check: rawContent=${JSON.stringify(message.content.substring(0, 100))}, ` +
-      `plainContent=${JSON.stringify(plainContent.substring(0, 100))}, ` +
-      `botUserId=${currentBotUserId}, botUsername=${currentBotUsername}, ` +
-      `requireMention=${requireMention}, explicitlyMentioned=${explicitlyMentioned}, ` +
-      `hasAnyMention=${hasAnyMention}, wasMentioned=${wasMentioned}, ` +
-      `mentionRegexCount=${mentionRegexes.length}`,
-    );
-
-    // Resolve mention gating (allows control commands to bypass mention requirement)
-    const canDetectMention = Boolean(currentBotUserId || currentBotUsername) || mentionRegexes.length > 0;
-    const mentionGate = resolveMentionGatingWithBypass({
-      isGroup: true,
-      requireMention,
-      canDetectMention,
-      wasMentioned,
-      implicitMention: false,
-      hasAnyMention,
-      allowTextCommands: runtime.channel.commands.shouldHandleTextCommands({ cfg, surface: "team9" }),
-      hasControlCommand: runtime.channel.text.hasControlCommand(plainContent, cfg),
-      commandAuthorized: true,
-    });
-
-    if (mentionGate.shouldSkip) {
-      console.log(
-        `[Team9] Skipping group message in channel ${message.channelId} (mention required but not mentioned)`,
-      );
-      return;
-    }
-
-    effectiveWasMentioned = mentionGate.effectiveWasMentioned;
-  }
-
-  console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
-
-  const sessionKey = route.sessionKey;
-
-  console.log(`[Team9] Routed: agentId=${agentId}, matchedBy=${route.matchedBy}, sessionKey=${sessionKey}`);
-
-  // Build the message context
-  const fromLabel = message.isGroup
-    ? `Team9 Channel ${message.channelId}`
-    : `Team9 DM from ${message.senderName || message.senderId}`;
-
-  const to = `team9:${message.channelId}`;
-
-  const ctx = runtime.channel.reply.finalizeInboundContext({
-    Body: plainContent,
-    RawBody: message.content,
-    CommandBody: plainContent,
-    From: to,
-    To: to,
-    SessionKey: sessionKey,
-    AccountId: account.accountId,
-    ChatType: message.isGroup ? "group" : "direct",
-    ConversationLabel: fromLabel,
-    SenderName: message.senderName || "Unknown",
-    SenderId: message.senderId,
-    Provider: "team9" as const,
-    Surface: "team9" as const,
-    MessageSid: message.messageId,
-    Timestamp: message.timestamp.getTime(),
-    CommandAuthorized: true, // Allow commands from Team9
-    WasMentioned: message.isGroup ? effectiveWasMentioned : undefined,
-    OriginatingChannel: "team9" as const,
-    OriginatingTo: to,
-  });
-
-  // Create reply dispatcher that sends responses back to Team9
-  const { dispatcher, replyOptions, markDispatchIdle } =
-    runtime.channel.reply.createReplyDispatcherWithTyping({
-      humanDelay: runtime.channel.reply.resolveHumanDelayConfig(cfg, agentId),
-      deliver: async (payload) => {
-        // Send reply to Team9
-        if (payload.text) {
-          try {
-            await api.sendMessage(message.channelId, {
-              content: payload.text,
-              parentId: message.parentId,
-            });
-          } catch (err) {
-            console.error(`[Team9] Failed to send reply:`, err);
-          }
-        }
-      },
-      onError: (err, info) => {
-        console.error(`[Team9] Reply ${info.kind} failed:`, err);
-      },
-    });
-
-  // Dispatch the message to the agent
-  try {
-    await runtime.channel.reply.dispatchReplyFromConfig({
-      ctx,
-      cfg,
-      dispatcher,
-      replyOptions,
-    });
-  } catch (err) {
-    console.error(`[Team9] Failed to dispatch message:`, err);
-  } finally {
-    markDispatchIdle();
-  }
-}
-
-/**
- * Get or create connection for an account
+ * Get or create connection for an account.
+ * Used by outbound methods (sendText, sendMedia, actions).
  */
 async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig) {
   const existing = activeConnections.get(account.accountId);
@@ -257,34 +50,38 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     return existing;
   }
 
-  // Token is required (from env var TEAM9_TOKEN or config)
   if (!account.token) {
     throw new Error("No token available for Team9 connection. Set TEAM9_TOKEN env var.");
   }
 
-  // Create new connection with token
   const api = new Team9ApiClient(account.baseUrl, account.token);
-  const token = account.token;
+
+  // Create monitor context (botUserId/botUsername set during onAuthenticated)
+  const monitorCtx = createTeam9MonitorContext({
+    account,
+    api,
+    ws: null as unknown as Team9WebSocketClient, // set after ws creation
+    cfg,
+  });
+
+  // Create debouncer-based message handler
+  const messageHandler = createTeam9MessageHandler(monitorCtx);
 
   const ws = createTeam9WsClient(
-    { ...account, token },
+    { ...account, token: account.token },
     {
-      onMessage: (message) => {
-        // Forward message to OpenClaw agent for processing
-        void handleIncomingMessage(message, account, api, cfg);
-      },
+      onMessage: messageHandler,
       onConnect: () => {
         console.log(`[Team9] WebSocket connected for account: ${account.accountId}`);
       },
       onAuthenticated: async (userId) => {
-        // Store bot's user ID for self-message filtering
-        currentBotUserId = userId;
+        monitorCtx.botUserId = userId;
         console.log(`[Team9] Bot user ID set to: ${userId}`);
 
         // Fetch bot user profile for mention detection in group messages
         try {
           const me = await api.getMe();
-          currentBotUsername = me.username ?? null;
+          monitorCtx.botUsername = me.username ?? null;
           console.log(`[Team9] Bot username: ${me.username}, displayName: ${me.displayName ?? "none"}`);
         } catch (err) {
           console.warn(`[Team9] Failed to fetch bot user profile, mention detection may be limited:`, err);
@@ -296,17 +93,24 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
           console.log(`[Team9] Joining ${channels.length} existing channels...`);
           for (const channel of channels) {
             console.log(`[Team9]   -> channel: ${channel.id} type=${channel.type} name=${channel.name}`);
-            // Cache channel type for isGroup determination in incoming messages
             ws.setChannelType(channel.id, channel.type);
             ws.joinChannel(channel.id);
           }
           console.log(`[Team9] Joined all channels successfully`);
+
+          // Cache tenantId from channel metadata for file API operations
+          if (!api.getTenantId()) {
+            const firstWithTenant = channels.find((ch) => ch.tenantId);
+            if (firstWithTenant?.tenantId) {
+              api.setTenantId(firstWithTenant.tenantId);
+              console.log(`[Team9] Cached tenantId: ${firstWithTenant.tenantId}`);
+            }
+          }
         } catch (err) {
           console.error(`[Team9] Failed to join existing channels:`, err);
         }
       },
       onChannelJoined: async (channelId) => {
-        // Fetch channel metadata to cache the type for isGroup determination
         try {
           const channel = await api.getChannel(channelId);
           ws.setChannelType(channel.id, channel.type);
@@ -324,6 +128,9 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     }
   );
 
+  // Complete the monitor context with the ws reference
+  monitorCtx.ws = ws;
+
   try {
     await ws.connect();
   } catch (err) {
@@ -337,7 +144,7 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     throw err;
   }
 
-  const connection = { api, ws };
+  const connection = { api, ws, monitorCtx };
   activeConnections.set(account.accountId, connection);
   return connection;
 }
@@ -351,7 +158,6 @@ async function sendTeam9Message(
   options?: {
     accountId?: string;
     replyTo?: string;
-    mediaUrl?: string;
   }
 ): Promise<{
   messageId?: string;
@@ -376,7 +182,6 @@ async function sendTeam9Message(
     let channelId = to;
     if (to.startsWith("user:")) {
       const userId = to.replace("user:", "");
-      // Get or create DM channel
       const dmChannel = await api.getOrCreateDmChannel(userId);
       channelId = dmChannel.id;
     }
@@ -411,7 +216,6 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
     quickstartAllowFrom: true,
   },
 
-  // Onboarding adapter for `openclaw onboard` wizard
   onboarding: team9OnboardingAdapter,
 
   capabilities: {
@@ -543,19 +347,69 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
     },
 
     sendMedia: async ({ to, text, mediaUrl, accountId, replyToId }) => {
-      // For now, just send text with media URL
-      // TODO: Implement proper file upload to Team9
-      const messageText = mediaUrl ? `${text}\n\n${mediaUrl}` : text;
-      const result = await sendTeam9Message(to, messageText, {
-        accountId: accountId ?? undefined,
-        replyTo: replyToId ?? undefined,
-      });
-      return {
-        channel: "team9" as const,
-        messageId: result.messageId ?? "",
-        status: result.status,
-        error: result.error,
-      };
+      try {
+        const runtime = getTeam9Runtime();
+        const cfg = runtime.config.loadConfig();
+        const account = resolveTeam9Account({
+          cfg,
+          accountId: accountId ?? undefined,
+        });
+
+        if (!isTeam9AccountConfigured(account)) {
+          return { channel: "team9" as const, messageId: "", status: "failed" as const, error: "Account not configured" };
+        }
+
+        const { api } = await getConnection(account, cfg);
+
+        let channelId = to;
+        if (to.startsWith("user:")) {
+          const userId = to.replace("user:", "");
+          const dmChannel = await api.getOrCreateDmChannel(userId);
+          channelId = dmChannel.id;
+        }
+
+        let attachments: Team9OutboundAttachment[] | undefined;
+
+        if (mediaUrl) {
+          try {
+            const media = await runtime.media.loadWebMedia(mediaUrl);
+            const fileName = media.fileName ?? "upload";
+            const contentType = media.contentType ?? "application/octet-stream";
+
+            const attachment = await uploadMediaToTeam9(api, {
+              buffer: media.buffer,
+              fileName,
+              contentType,
+              channelId,
+            });
+            attachments = [attachment];
+          } catch (err) {
+            console.error(`[Team9] Failed to upload media, falling back to URL in text: ${String(err)}`);
+            text = mediaUrl ? `${text}\n\n${mediaUrl}` : text;
+          }
+        }
+
+        const message = await api.sendMessage(channelId, {
+          content: text || "",
+          parentId: replyToId ?? undefined,
+          attachments,
+        });
+
+        return {
+          channel: "team9" as const,
+          messageId: message.id,
+          status: "sent" as const,
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`[Team9] Failed to send media message:`, errorMessage);
+        return {
+          channel: "team9" as const,
+          messageId: "",
+          status: "failed" as const,
+          error: errorMessage,
+        };
+      }
     },
   },
 
@@ -563,7 +417,6 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
   threading: {
     resolveReplyToMode: ({ cfg }) => {
-      // Team9 supports threading via parentId
       return "first";
     },
   },
@@ -572,17 +425,14 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
   messaging: {
     normalizeTarget: (target) => {
-      // Support formats: channelId, user:userId, channel:channelId
       if (target.startsWith("user:") || target.startsWith("channel:")) {
         return target;
       }
-      // Assume it's a channel ID
       return target;
     },
 
     targetResolver: {
       looksLikeId: (id) => {
-        // Team9 uses UUIDs
         return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
           id
         );
