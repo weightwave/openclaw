@@ -138,6 +138,7 @@ export type CreateMessageDto = {
     mimeType: string;
     url: string;
   }>;
+  metadata?: Record<string, unknown>;
 };
 
 // ==================== WebSocket Event Types ====================

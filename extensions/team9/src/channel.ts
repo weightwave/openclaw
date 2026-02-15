@@ -113,6 +113,7 @@ async function handleIncomingMessage(
   message: Team9IncomingMessage,
   account: ResolvedTeam9Account,
   api: Team9ApiClient,
+  ws: Team9WebSocketClient,
   cfg: OpenClawConfig
 ): Promise<void> {
   const runtime = getTeam9Runtime();
@@ -245,10 +246,15 @@ async function handleIncomingMessage(
 
   const to = `team9:${message.channelId}`;
 
+  // Enable reasoning streaming for Team9 messages.
+  // The /reasoning directive is extracted by the framework before the agent sees it,
+  // and persists to the session (subsequent messages auto-inherit the setting).
+  const bodyWithReasoning = `/reasoning: stream\n${plainContent}`;
+
   const ctx = runtime.channel.reply.finalizeInboundContext({
-    Body: plainContent,
+    Body: bodyWithReasoning,
     RawBody: message.content,
-    CommandBody: plainContent,
+    CommandBody: bodyWithReasoning,
     From: to,
     To: to,
     SessionKey: sessionKey,
@@ -267,38 +273,121 @@ async function handleIncomingMessage(
     OriginatingTo: to,
   });
 
+  // Streaming state
+  const streamId = globalThis.crypto.randomUUID();
+  let streamStarted = false;
+  let accumulatedThinking = "";
+
   // Create reply dispatcher that sends responses back to Team9
   const { dispatcher, replyOptions, markDispatchIdle } =
     runtime.channel.reply.createReplyDispatcherWithTyping({
       humanDelay: runtime.channel.reply.resolveHumanDelayConfig(cfg, agentId),
-      deliver: async (payload) => {
-        // Send reply to Team9
+      deliver: async (payload: { text?: string }) => {
+        // Send reply to Team9, persist via HTTP API
         if (payload.text) {
           try {
-            await api.sendMessage(message.channelId, {
+            const persistedMessage = await api.sendMessage(message.channelId, {
               content: payload.text,
               parentId: message.parentId,
+              ...(accumulatedThinking
+                ? { metadata: { thinking: accumulatedThinking } }
+                : {}),
             });
+
+            if (streamStarted) {
+              ws.emitStreamingEnd({
+                streamId,
+                channelId: message.channelId,
+                message: persistedMessage,
+              });
+              // Reset for next deliver call (multi-block scenario)
+              streamStarted = false;
+              accumulatedThinking = "";
+            }
           } catch (err) {
             console.error(`[Team9] Failed to send reply:`, err);
+            if (streamStarted) {
+              ws.emitStreamingAbort({
+                streamId,
+                channelId: message.channelId,
+                reason: "error",
+                error: err instanceof Error ? err.message : String(err),
+              });
+              streamStarted = false;
+            }
           }
         }
       },
-      onError: (err, info) => {
+      onError: (err: unknown, info: { kind: string }) => {
         console.error(`[Team9] Reply ${info.kind} failed:`, err);
+        if (streamStarted) {
+          ws.emitStreamingAbort({
+            streamId,
+            channelId: message.channelId,
+            reason: "error",
+            error: err instanceof Error ? err.message : String(err),
+          });
+          streamStarted = false;
+        }
       },
     });
 
-  // Dispatch the message to the agent
+  // Dispatch the message to the agent with streaming callbacks
   try {
     await runtime.channel.reply.dispatchReplyFromConfig({
       ctx,
       cfg,
       dispatcher,
-      replyOptions,
+      replyOptions: {
+        ...replyOptions,
+        // Stream text content deltas to the client
+        onPartialReply: async (payload: { text?: string }) => {
+          if (!payload.text) return;
+          if (!streamStarted) {
+            streamStarted = true;
+            ws.emitStreamingStart({
+              streamId,
+              channelId: message.channelId,
+              parentId: message.parentId,
+            });
+          }
+          ws.emitStreamingDelta({
+            streamId,
+            channelId: message.channelId,
+            delta: payload.text,
+          });
+        },
+        // Stream thinking/reasoning deltas to the client
+        onReasoningStream: async (payload: { text?: string }) => {
+          if (!payload.text) return;
+          if (!streamStarted) {
+            streamStarted = true;
+            ws.emitStreamingStart({
+              streamId,
+              channelId: message.channelId,
+              parentId: message.parentId,
+            });
+          }
+          accumulatedThinking = payload.text;
+          ws.emitStreamingThinkingDelta({
+            streamId,
+            channelId: message.channelId,
+            delta: payload.text,
+          });
+        },
+      },
     });
   } catch (err) {
     console.error(`[Team9] Failed to dispatch message:`, err);
+    if (streamStarted) {
+      ws.emitStreamingAbort({
+        streamId,
+        channelId: message.channelId,
+        reason: "error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      streamStarted = false;
+    }
   } finally {
     markDispatchIdle();
   }
@@ -327,7 +416,7 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     {
       onMessage: (message) => {
         // Forward message to OpenClaw agent for processing
-        void handleIncomingMessage(message, account, api, cfg);
+        void handleIncomingMessage(message, account, api, ws, cfg);
       },
       onConnect: () => {
         console.log(`[Team9] WebSocket connected for account: ${account.accountId}`);

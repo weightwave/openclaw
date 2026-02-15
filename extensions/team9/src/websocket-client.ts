@@ -291,6 +291,54 @@ export class Team9WebSocketClient {
     this.socket.emit("remove_reaction", { messageId, emoji });
   }
 
+  // ==================== Streaming ====================
+
+  emitStreamingStart(data: {
+    streamId: string;
+    channelId: string;
+    parentId?: string;
+  }): void {
+    if (!this.socket || !this.isConnected) return;
+    this.socket.emit("streaming_start", data);
+  }
+
+  emitStreamingDelta(data: {
+    streamId: string;
+    channelId: string;
+    delta: string;
+  }): void {
+    if (!this.socket || !this.isConnected) return;
+    this.socket.emit("streaming_delta", data);
+  }
+
+  emitStreamingThinkingDelta(data: {
+    streamId: string;
+    channelId: string;
+    delta: string;
+  }): void {
+    if (!this.socket || !this.isConnected) return;
+    this.socket.emit("streaming_thinking_delta", data);
+  }
+
+  emitStreamingEnd(data: {
+    streamId: string;
+    channelId: string;
+    message: Team9Message;
+  }): void {
+    if (!this.socket || !this.isConnected) return;
+    this.socket.emit("streaming_end", data);
+  }
+
+  emitStreamingAbort(data: {
+    streamId: string;
+    channelId: string;
+    reason: "error" | "cancelled" | "timeout" | "disconnect";
+    error?: string;
+  }): void {
+    if (!this.socket || !this.isConnected) return;
+    this.socket.emit("streaming_abort", data);
+  }
+
   // ==================== Connection Management ====================
 
   disconnect(): void {

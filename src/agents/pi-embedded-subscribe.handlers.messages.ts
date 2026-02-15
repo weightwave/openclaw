@@ -50,6 +50,24 @@ export function handleMessageUpdate(
       : undefined;
   const evtType = typeof assistantRecord?.type === "string" ? assistantRecord.type : "";
 
+  // Handle native thinking events from providers that return structured reasoning
+  // (e.g. OpenRouter Gemini via reasoning_content/reasoning fields).
+  if (evtType === "thinking_delta" || evtType === "thinking_start" || evtType === "thinking_end") {
+    if (ctx.state.streamReasoning) {
+      const thinkDelta = typeof assistantRecord?.delta === "string" ? assistantRecord.delta : "";
+      const thinkContent =
+        typeof assistantRecord?.content === "string" ? assistantRecord.content : "";
+      if (evtType === "thinking_delta" && thinkDelta) {
+        ctx.state.thinkingBuffer += thinkDelta;
+        ctx.emitReasoningStream(ctx.state.thinkingBuffer);
+      } else if (evtType === "thinking_end" && thinkContent) {
+        ctx.state.thinkingBuffer = thinkContent;
+        ctx.emitReasoningStream(ctx.state.thinkingBuffer);
+      }
+    }
+    return;
+  }
+
   if (evtType !== "text_delta" && evtType !== "text_start" && evtType !== "text_end") {
     return;
   }
@@ -282,6 +300,7 @@ export function handleMessageEnd(
   }
 
   ctx.state.deltaBuffer = "";
+  ctx.state.thinkingBuffer = "";
   ctx.state.blockBuffer = "";
   ctx.blockChunker?.reset();
   ctx.state.blockState.thinking = false;
