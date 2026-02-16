@@ -292,6 +292,8 @@ async function handleIncomingMessage(
               ...(accumulatedThinking
                 ? { metadata: { thinking: accumulatedThinking } }
                 : {}),
+              // Skip HTTP broadcast during streaming; streaming_end will broadcast the final message
+              ...(streamStarted ? { skipBroadcast: true } : {}),
             });
 
             if (streamStarted) {

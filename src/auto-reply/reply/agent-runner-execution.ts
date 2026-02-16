@@ -99,9 +99,14 @@ export async function runAgentTurnWithFallback(params: {
 
   while (true) {
     try {
-      const allowPartialStream = !(
-        params.followupRun.run.reasoningLevel === "stream" && params.opts?.onReasoningStream
-      );
+      // const allowPartialStream = !(
+      //   params.followupRun.run.reasoningLevel === "stream" &&
+      //   params.opts?.onReasoningStream
+      // );
+      // Allow partial text streaming even when reasoning streaming is active.
+      // Channels like Team9 handle text and reasoning as separate streams,
+      // so interleaving is not an issue.
+      const allowPartialStream = true;
       const normalizeStreamingText = (payload: ReplyPayload): { text?: string; skip: boolean } => {
         if (!allowPartialStream) return { skip: true };
         let text = payload.text;

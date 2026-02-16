@@ -139,6 +139,8 @@ export type CreateMessageDto = {
     url: string;
   }>;
   metadata?: Record<string, unknown>;
+  /** Skip WebSocket broadcast (used during streaming to avoid duplicate new_message) */
+  skipBroadcast?: boolean;
 };
 
 // ==================== WebSocket Event Types ====================
