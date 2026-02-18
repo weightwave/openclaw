@@ -40,6 +40,68 @@ const activeConnections = new Map<
   }
 >();
 
+// ==================== Connection Watchdog ====================
+
+let watchdogInterval: NodeJS.Timeout | null = null;
+const watchdogFailures = new Map<string, number>();
+
+function startWatchdog(): void {
+  if (watchdogInterval) return;
+
+  watchdogInterval = setInterval(() => {
+    for (const [accountId, conn] of activeConnections) {
+      const active = conn.ws.isActive();
+      const healthy = conn.ws.isHealthy();
+
+      if (active && healthy) {
+        watchdogFailures.delete(accountId);
+        continue;
+      }
+
+      const failures = (watchdogFailures.get(accountId) ?? 0) + 1;
+      watchdogFailures.set(accountId, failures);
+
+      const lastActivity = conn.ws.getLastActivityAt();
+      const agoSec = lastActivity > 0 ? Math.round((Date.now() - lastActivity) / 1000) : -1;
+      console.warn(
+        `[Team9 Watchdog] Account ${accountId} unhealthy ` +
+          `(active=${active}, healthy=${healthy}, lastActivity=${agoSec}s ago, failures=${failures})`,
+      );
+
+      if (failures >= 3) {
+        // 3 consecutive failures (~3 minutes) — tear down and rebuild
+        console.error(
+          `[Team9 Watchdog] Account ${accountId}: ${failures} consecutive failures, rebuilding connection`,
+        );
+        watchdogFailures.delete(accountId);
+
+        // Rebuild in the background
+        void (async () => {
+          try {
+            conn.ws.disconnect();
+            activeConnections.delete(accountId);
+            const runtime = getTeam9Runtime();
+            const cfg = runtime.config.loadConfig();
+            const account = resolveTeam9Account({ cfg, accountId });
+            await getConnection(account, cfg);
+            console.log(`[Team9 Watchdog] Account ${accountId} reconnected successfully`);
+          } catch (err) {
+            console.error(`[Team9 Watchdog] Failed to rebuild connection for ${accountId}:`, err);
+          }
+        })();
+      }
+    }
+  }, 60_000); // Check every 60 seconds
+}
+
+function stopWatchdog(): void {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
+  watchdogFailures.clear();
+}
+
 /**
  * Get or create connection for an account.
  * Used by outbound methods (sendText, sendMedia, actions).
@@ -146,6 +208,10 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
 
   const connection = { api, ws, monitorCtx };
   activeConnections.set(account.accountId, connection);
+
+  // Start the connection watchdog when the first connection is created
+  startWatchdog();
+
   return connection;
 }
 
@@ -516,7 +582,13 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
       if (connection) {
         connection.ws.disconnect();
         activeConnections.delete(account.accountId);
+        watchdogFailures.delete(account.accountId);
         console.log(`[Team9] Account ${account.accountId} stopped`);
+      }
+
+      // Stop the watchdog when no connections remain
+      if (activeConnections.size === 0) {
+        stopWatchdog();
       }
     },
   },
@@ -534,8 +606,10 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         return { status: "disconnected" };
       }
 
+      const active = connection.ws.isActive();
+      const healthy = connection.ws.isHealthy();
       return {
-        status: connection.ws.isActive() ? "connected" : "disconnected",
+        status: active && healthy ? "connected" : "disconnected",
         baseUrl: account.baseUrl,
       };
     },
