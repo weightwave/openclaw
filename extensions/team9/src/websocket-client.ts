@@ -94,7 +94,7 @@ export class Team9WebSocketClient {
     // Track activity on ALL socket.io events for health monitoring
     this.socket.onAny((eventName: string, ...args: unknown[]) => {
       this.lastActivityAt = Date.now();
-      if (eventName === "pong" || eventName === "user_online" || eventName === "user_offline") return;
+      if (eventName === "user_online" || eventName === "user_offline") return;
       const preview = args.length > 0 ? JSON.stringify(args[0]).substring(0, 200) : "";
       console.log(`[Team9 WS DEBUG] Event: ${eventName} ${preview}`);
     });
@@ -200,12 +200,7 @@ export class Team9WebSocketClient {
       }
     );
 
-    // Pong response — reset missed pong counter
-    this.socket.on("pong", (data: { timestamp: number; serverTime: number }) => {
-      this.missedPongs = 0;
-      const latency = Date.now() - data.timestamp;
-      console.log(`[Team9 WS] Pong received, latency: ${latency}ms`);
-    });
+    // Note: pong is received via ack callback in startHeartbeat(), not as a named event
   }
 
   private handleIncomingMessage(message: Team9Message): void {
@@ -245,7 +240,11 @@ export class Team9WebSocketClient {
       }
 
       this.missedPongs++;
-      this.socket.emit("ping", { timestamp: Date.now() });
+      this.socket.emit("ping", { timestamp: Date.now() }, (pong: { timestamp: number; serverTime: number }) => {
+        this.missedPongs = 0;
+        const latency = Date.now() - pong.timestamp;
+        console.log(`[Team9 WS] Pong received, latency: ${latency}ms`);
+      });
     }, 30000);
   }
 
