@@ -1,5 +1,5 @@
 {
-  "name": "@team9/openclaw-managed",
+  "name": "@team9/team9",
   "version": "2026.2.2",
   "type": "module",
   "description": "OpenClaw Team9 channel plugin - integrates Team9 IM platform",
@@ -17,7 +17,7 @@
       "order": 70
     },
     "install": {
-      "npmSpec": "@team9/openclaw-managed",
+      "npmSpec": "@team9/team9",
       "localPath": "extensions/team9",
       "defaultChoice": "local"
     }
