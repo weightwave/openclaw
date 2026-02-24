@@ -305,19 +305,19 @@ export class Team9WebSocketClient {
   emitStreamingDelta(data: {
     streamId: string;
     channelId: string;
-    delta: string;
+    content: string;
   }): void {
     if (!this.socket || !this.isConnected) return;
-    this.socket.emit("streaming_delta", data);
+    this.socket.emit("streaming_content", data);
   }
 
   emitStreamingThinkingDelta(data: {
     streamId: string;
     channelId: string;
-    delta: string;
+    content: string;
   }): void {
     if (!this.socket || !this.isConnected) return;
-    this.socket.emit("streaming_thinking_delta", data);
+    this.socket.emit("streaming_thinking_content", data);
   }
 
   emitStreamingEnd(data: {

@@ -356,7 +356,7 @@ async function handleIncomingMessage(
           ws.emitStreamingDelta({
             streamId,
             channelId: message.channelId,
-            delta: payload.text,
+            content: payload.text,
           });
         },
         // Stream thinking/reasoning deltas to the client
@@ -374,7 +374,7 @@ async function handleIncomingMessage(
           ws.emitStreamingThinkingDelta({
             streamId,
             channelId: message.channelId,
-            delta: payload.text,
+            content: payload.text,
           });
         },
       },
