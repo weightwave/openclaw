@@ -244,10 +244,10 @@ async function sendTeam9Message(
 
     const { api } = await getConnection(account, cfg);
 
-    // Parse target: could be channelId or user:userId
-    let channelId = to;
-    if (to.startsWith("user:")) {
-      const userId = to.replace("user:", "");
+    // Parse target: could be team9:channelId, user:userId, or bare channelId
+    let channelId = to.startsWith("team9:") ? to.slice(6) : to;
+    if (channelId.startsWith("user:")) {
+      const userId = channelId.replace("user:", "");
       const dmChannel = await api.getOrCreateDmChannel(userId);
       channelId = dmChannel.id;
     }
@@ -427,9 +427,9 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
         const { api } = await getConnection(account, cfg);
 
-        let channelId = to;
-        if (to.startsWith("user:")) {
-          const userId = to.replace("user:", "");
+        let channelId = to.startsWith("team9:") ? to.slice(6) : to;
+        if (channelId.startsWith("user:")) {
+          const userId = channelId.replace("user:", "");
           const dmChannel = await api.getOrCreateDmChannel(userId);
           channelId = dmChannel.id;
         }
