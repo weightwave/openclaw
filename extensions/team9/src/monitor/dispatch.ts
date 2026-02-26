@@ -33,7 +33,12 @@ export async function dispatchPreparedTeam9Message(
           payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
         const text = payload.text ?? "";
 
-        if (!text && mediaUrls.length === 0) return;
+        if (!text && mediaUrls.length === 0) {
+          console.warn(
+            `[Team9] Skipping empty reply for channel=${channelId} parentId=${message.parentId} (no text, no media)`,
+          );
+          return;
+        }
 
         try {
           if (mediaUrls.length > 0) {
@@ -57,25 +62,43 @@ export async function dispatchPreparedTeam9Message(
               }
             }
 
-            await ctx.api.sendMessage(channelId, {
+            console.log(
+              `[Team9] Sending reply: channel=${channelId} textLen=${text.length} media=${attachments.length}/${mediaUrls.length}`,
+            );
+            const sent = await ctx.api.sendMessage(channelId, {
               content: text,
               parentId: message.parentId,
               attachments:
                 attachments.length > 0 ? attachments : undefined,
             });
+            console.log(
+              `[Team9] Reply delivered: messageId=${sent.id} channel=${channelId}`,
+            );
           } else {
             // Text-only reply
-            await ctx.api.sendMessage(channelId, {
+            console.log(
+              `[Team9] Sending reply: channel=${channelId} textLen=${text.length}`,
+            );
+            const sent = await ctx.api.sendMessage(channelId, {
               content: text,
               parentId: message.parentId,
             });
+            console.log(
+              `[Team9] Reply delivered: messageId=${sent.id} channel=${channelId}`,
+            );
           }
         } catch (err) {
-          console.error(`[Team9] Failed to send reply:`, err);
+          console.error(
+            `[Team9] Failed to send reply: channel=${channelId} textLen=${text.length} media=${mediaUrls.length}`,
+            err,
+          );
         }
       },
       onError: (err, info) => {
-        console.error(`[Team9] Reply ${info.kind} failed:`, err);
+        console.error(
+          `[Team9] Reply ${info.kind} failed: channel=${channelId}`,
+          err,
+        );
       },
       // Typing indicators: show "is typing" while the agent processes
       onReplyStart: async () => {
@@ -95,7 +118,7 @@ export async function dispatchPreparedTeam9Message(
       replyOptions,
     });
   } catch (err) {
-    console.error(`[Team9] Failed to dispatch message:`, err);
+    console.error(`[Team9] Failed to dispatch message: channel=${channelId}`, err);
   } finally {
     markDispatchIdle();
   }
