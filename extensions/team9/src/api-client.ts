@@ -10,6 +10,9 @@ import type {
   Team9User,
   CreateMessageDto,
   ResolvedTeam9Account,
+  Team9PresignedUploadCredentials,
+  Team9ConfirmUploadResult,
+  Team9DownloadUrlResult,
 } from "./types.js";
 
 /**
@@ -31,10 +34,19 @@ export class Team9AuthError extends Error {
 export class Team9ApiClient {
   private baseUrl: string;
   private token: string;
+  private tenantId: string | undefined;
 
   constructor(baseUrl: string, token: string) {
     this.baseUrl = baseUrl.replace(/\/$/, ""); // Remove trailing slash
     this.token = token;
+  }
+
+  setTenantId(tenantId: string): void {
+    this.tenantId = tenantId;
+  }
+
+  getTenantId(): string | undefined {
+    return this.tenantId;
   }
 
   private async fetch<T>(
@@ -48,6 +60,9 @@ export class Team9ApiClient {
     };
 
     headers["Authorization"] = `Bearer ${this.token}`;
+    if (this.tenantId) {
+      headers["X-Tenant-Id"] = this.tenantId;
+    }
 
     const response = await fetch(url, {
       ...options,
@@ -181,6 +196,75 @@ export class Team9ApiClient {
 
   async getUser(userId: string): Promise<Team9User> {
     return this.fetch<Team9User>(`/users/${userId}`);
+  }
+
+  // ==================== Files ====================
+
+  async createPresignedUpload(params: {
+    filename: string;
+    contentType: string;
+    fileSize: number;
+    channelId?: string;
+  }): Promise<Team9PresignedUploadCredentials> {
+    return this.fetch<Team9PresignedUploadCredentials>("/files/presign", {
+      method: "POST",
+      body: JSON.stringify({
+        filename: params.filename,
+        contentType: params.contentType,
+        fileSize: params.fileSize,
+        visibility: "workspace",
+        channelId: params.channelId,
+      }),
+    });
+  }
+
+  async uploadToS3(
+    presignedUrl: string,
+    buffer: Buffer,
+    fields: Record<string, string>,
+    contentType: string,
+  ): Promise<void> {
+    const formData = new FormData();
+    for (const [key, value] of Object.entries(fields)) {
+      formData.append(key, value);
+    }
+    // File must be appended last (S3 POST requirement)
+    const blob = new Blob([new Uint8Array(buffer)], { type: contentType });
+    formData.append("file", blob);
+
+    const response = await fetch(presignedUrl, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok && response.status !== 204) {
+      const text = await response.text().catch(() => "");
+      throw new Error(
+        `S3 upload failed: ${response.status} ${response.statusText} ${text}`,
+      );
+    }
+  }
+
+  async confirmUpload(params: {
+    key: string;
+    fileName: string;
+    channelId?: string;
+  }): Promise<Team9ConfirmUploadResult> {
+    return this.fetch<Team9ConfirmUploadResult>("/files/confirm", {
+      method: "POST",
+      body: JSON.stringify({
+        key: params.key,
+        fileName: params.fileName,
+        visibility: "workspace",
+        channelId: params.channelId,
+      }),
+    });
+  }
+
+  async getFileDownloadUrl(fileKey: string): Promise<Team9DownloadUrlResult> {
+    return this.fetch<Team9DownloadUrlResult>(
+      `/files/${encodeURIComponent(fileKey)}/download-url`,
+    );
   }
 
   // ==================== Direct Messages ====================

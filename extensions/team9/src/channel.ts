@@ -1,18 +1,16 @@
 /**
  * Team9 Channel Plugin
  *
- * Implements the ChannelPlugin interface for Team9 integration
+ * Implements the ChannelPlugin interface for Team9 integration.
  *
- * Session Isolation:
- * Each Team9 user gets their own isolated agent with a separate workspace.
- * This ensures conversation context (IDENTITY.md, SOUL.md, USER.md) is not shared
- * between users. The agentId is generated as `team9-user-{senderId}` and the
- * workspace is automatically created at `~/clawd-team9-user-{senderId}`.
+ * Agent routing is handled by the core framework via resolveAgentRoute().
+ * By default all messages go to the default agent. Use `openclaw agent add --bind team9`
+ * to route Team9 messages to a dedicated agent with its own workspace.
  */
 
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
-import { resolveMentionGatingWithBypass } from "openclaw/plugin-sdk";
-import type { ResolvedTeam9Account, Team9IncomingMessage } from "./types.js";
+import { jsonResult, readStringParam } from "openclaw/plugin-sdk";
+import type { ResolvedTeam9Account, Team9Config, Team9OutboundAttachment } from "./types.js";
 import {
   listTeam9AccountIds,
   resolveTeam9Account,
@@ -23,380 +21,90 @@ import {
 } from "./config.js";
 import { getTeam9Runtime } from "./runtime.js";
 import { Team9ApiClient, Team9AuthError } from "./api-client.js";
-import { Team9WebSocketClient, createTeam9WsClient } from "./websocket-client.js";
+import { createTeam9WsClient } from "./websocket-client.js";
+import type { Team9WebSocketClient } from "./websocket-client.js";
 import { team9OnboardingAdapter } from "./onboarding.js";
 import { resolveTeam9GroupRequireMention } from "./group-mentions.js";
+import { uploadMediaToTeam9 } from "./media.js";
+import { createTeam9MonitorContext } from "./monitor/context.js";
+import type { Team9MonitorContext } from "./monitor/context.js";
+import { createTeam9MessageHandler } from "./monitor/message-handler.js";
 
-/**
- * Generate a unique agent ID for a Team9 user.
- * This ensures each user gets their own isolated workspace at ~/clawd-{agentId}.
- *
- * For DM chats: uses senderId to isolate per user
- * For group chats: uses channelId to isolate per group
- *
- * When accountId is provided (multi-bot mode), it's included in the agentId
- * to ensure different bots route to different OpenClaw agents:
- * - Single bot: team9-user-{senderId}
- * - Multi bot:  team9-{accountId}-user-{senderId}
- */
-function generateTeam9AgentId(params: {
-  senderId: string;
-  channelId: string;
-  isGroup: boolean;
-  accountId?: string;
-}): string {
-  // For group chats, use channelId so all group members share context
-  // For DM chats, use senderId so each user has their own context
-  const identifier = params.isGroup ? params.channelId : params.senderId;
-  // Sanitize to be safe for use in file paths
-  const sanitized = identifier.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
-  const chatType = params.isGroup ? "group" : "user";
-
-  // Include accountId in agentId for multi-bot scenarios
-  // Skip if accountId is "default" (single-bot mode)
-  if (params.accountId && params.accountId !== "default") {
-    const sanitizedAccount = params.accountId.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
-    return `team9-${sanitizedAccount}-${chatType}-${sanitized}`;
-  }
-
-  return `team9-${chatType}-${sanitized}`;
-}
-
-/**
- * Build a session key for Team9 with per-user/group agent isolation.
- * Format: agent:{agentId}:team9:{peerKind}:{channelId}
- */
-function buildTeam9SessionKey(params: {
-  agentId: string;
-  channelId: string;
-  isGroup: boolean;
-}): string {
-  const peerKind = params.isGroup ? "group" : "dm";
-  return `agent:${params.agentId}:team9:${peerKind}:${params.channelId}`.toLowerCase();
-}
-
-// Store current bot user ID to filter out self-messages and detect mentions
-let currentBotUserId: string | null = null;
-// Store bot username for mention detection in group messages
-let currentBotUsername: string | null = null;
-
-/**
- * Check if the bot was mentioned in the raw message content.
- * Team9 mention format: <mention data-user-id="{userId}" ...>@&lt;{userId}&gt;</mention>
- */
-function isBotMentioned(rawContent: string, botUserId: string | null): boolean {
-  if (!botUserId) return false;
-  // Structured mention tag: <mention data-user-id="botUserId">
-  if (rawContent.includes(`data-user-id="${botUserId}"`)) return true;
-  // Text mention formats
-  if (rawContent.includes(`@&lt;${botUserId}&gt;`)) return true;
-  if (rawContent.includes(`@<${botUserId}>`)) return true;
-  return false;
-}
-
-// Store active connections per account
+// Store active connections per account (with monitor context)
 const activeConnections = new Map<
   string,
   {
     api: Team9ApiClient;
     ws: Team9WebSocketClient;
+    monitorCtx: Team9MonitorContext;
   }
 >();
 
-/**
- * Handle incoming message from Team9 and route to OpenClaw agent
- *
- * Uses per-user/group agent isolation to ensure each user has their own
- * workspace and conversation context.
- */
-async function handleIncomingMessage(
-  message: Team9IncomingMessage,
-  account: ResolvedTeam9Account,
-  api: Team9ApiClient,
-  ws: Team9WebSocketClient,
-  cfg: OpenClawConfig
-): Promise<void> {
-  const runtime = getTeam9Runtime();
+// ==================== Connection Watchdog ====================
 
-  // Skip messages from self (the bot)
-  if (currentBotUserId && message.senderId === currentBotUserId) {
-    return;
-  }
+let watchdogInterval: NodeJS.Timeout | null = null;
+const watchdogFailures = new Map<string, number>();
 
-  // Extract mentioned user IDs from Team9 <mention> HTML tags before stripping
-  const mentionedUserIds = new Set<string>();
-  const mentionTagRegex = /<mention\s[^>]*data-user-id="([^"]+)"[^>]*>/gi;
-  let mentionMatch: RegExpExecArray | null;
-  while ((mentionMatch = mentionTagRegex.exec(message.content)) !== null) {
-    mentionedUserIds.add(mentionMatch[1]);
-  }
+function startWatchdog(): void {
+  if (watchdogInterval) return;
 
-  // Strip HTML tags and decode HTML entities for plain text processing
-  const plainContent = message.content
-    .replace(/<[^>]*>/g, "")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .trim();
+  watchdogInterval = setInterval(() => {
+    for (const [accountId, conn] of activeConnections) {
+      const active = conn.ws.isActive();
+      const healthy = conn.ws.isHealthy();
 
-  if (!plainContent) {
-    return;
-  }
+      if (active && healthy) {
+        watchdogFailures.delete(accountId);
+        continue;
+      }
 
-  // In group chats, only respond when the bot is explicitly @mentioned
-  if (message.isGroup && !isBotMentioned(message.content, currentBotUserId)) {
-    return;
-  }
+      const failures = (watchdogFailures.get(accountId) ?? 0) + 1;
+      watchdogFailures.set(accountId, failures);
 
-  console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
-
-  // Generate per-user/group agent ID for workspace isolation
-  // Each user gets their own agent with isolated workspace at ~/clawd-team9-user-{senderId}
-  // Each group gets shared agent with workspace at ~/clawd-team9-group-{channelId}
-  // When using multiple bot accounts, accountId is included to route to different agents
-  const agentId = generateTeam9AgentId({
-    senderId: message.senderId,
-    channelId: message.channelId,
-    isGroup: message.isGroup,
-    accountId: account.accountId,
-  });
-
-  // ===== Mention-based filtering for group messages =====
-  let effectiveWasMentioned: boolean | undefined;
-
-  if (message.isGroup) {
-    // Resolve requireMention setting for this channel
-    const requireMention = resolveTeam9GroupRequireMention({
-      cfg,
-      groupId: message.channelId,
-      groupChannel: message.channelId,
-      accountId: account.accountId,
-    });
-
-    // Build mention regexes from agent identity/config
-    const mentionRegexes = runtime.channel.mentions.buildMentionRegexes(cfg, agentId);
-
-    // Detect explicit @-mention of the bot using extracted HTML mention tags
-    const explicitlyMentioned = Boolean(
-      currentBotUserId && mentionedUserIds.has(currentBotUserId),
-    );
-    const hasAnyMention = mentionedUserIds.size > 0 || /@\w+/.test(plainContent);
-
-    // Use core mention pattern matching with explicit signal
-    const wasMentioned = runtime.channel.mentions.matchesMentionWithExplicit({
-      text: plainContent,
-      mentionRegexes,
-      explicit: {
-        hasAnyMention,
-        isExplicitlyMentioned: explicitlyMentioned,
-        canResolveExplicit: Boolean(currentBotUserId || currentBotUsername),
-      },
-    });
-
-    console.log(
-      `[Team9] Mention check: rawContent=${JSON.stringify(message.content.substring(0, 100))}, ` +
-      `plainContent=${JSON.stringify(plainContent.substring(0, 100))}, ` +
-      `botUserId=${currentBotUserId}, botUsername=${currentBotUsername}, ` +
-      `requireMention=${requireMention}, explicitlyMentioned=${explicitlyMentioned}, ` +
-      `hasAnyMention=${hasAnyMention}, wasMentioned=${wasMentioned}, ` +
-      `mentionRegexCount=${mentionRegexes.length}`,
-    );
-
-    // Resolve mention gating (allows control commands to bypass mention requirement)
-    const canDetectMention = Boolean(currentBotUserId || currentBotUsername) || mentionRegexes.length > 0;
-    const mentionGate = resolveMentionGatingWithBypass({
-      isGroup: true,
-      requireMention,
-      canDetectMention,
-      wasMentioned,
-      implicitMention: false,
-      hasAnyMention,
-      allowTextCommands: runtime.channel.commands.shouldHandleTextCommands({ cfg, surface: "team9" }),
-      hasControlCommand: runtime.channel.text.hasControlCommand(plainContent, cfg),
-      commandAuthorized: true,
-    });
-
-    if (mentionGate.shouldSkip) {
-      console.log(
-        `[Team9] Skipping group message in channel ${message.channelId} (mention required but not mentioned)`,
+      const lastActivity = conn.ws.getLastActivityAt();
+      const agoSec = lastActivity > 0 ? Math.round((Date.now() - lastActivity) / 1000) : -1;
+      console.warn(
+        `[Team9 Watchdog] Account ${accountId} unhealthy ` +
+          `(active=${active}, healthy=${healthy}, lastActivity=${agoSec}s ago, failures=${failures})`,
       );
-      return;
-    }
 
-    effectiveWasMentioned = mentionGate.effectiveWasMentioned;
-  }
+      if (failures >= 3) {
+        // 3 consecutive failures (~3 minutes) — tear down and rebuild
+        console.error(
+          `[Team9 Watchdog] Account ${accountId}: ${failures} consecutive failures, rebuilding connection`,
+        );
+        watchdogFailures.delete(accountId);
 
-  console.log(`[Team9] Processing message from ${message.senderName}: ${plainContent.substring(0, 50)}...`);
-
-  // Build session key with isolated agent
-  const sessionKey = buildTeam9SessionKey({
-    agentId,
-    channelId: message.channelId,
-    isGroup: message.isGroup,
-  });
-
-  console.log(`[Team9] Session isolation: agentId=${agentId}, sessionKey=${sessionKey}`);
-
-  // Build the message context
-  const fromLabel = message.isGroup
-    ? `Team9 Channel ${message.channelId}`
-    : `Team9 DM from ${message.senderName || message.senderId}`;
-
-  const to = `team9:${message.channelId}`;
-
-  // Enable reasoning streaming for Team9 messages.
-  // The /reasoning directive is extracted by the framework before the agent sees it,
-  // and persists to the session (subsequent messages auto-inherit the setting).
-  const bodyWithReasoning = `/reasoning: stream\n${plainContent}`;
-
-  const ctx = runtime.channel.reply.finalizeInboundContext({
-    Body: bodyWithReasoning,
-    RawBody: message.content,
-    CommandBody: bodyWithReasoning,
-    From: to,
-    To: to,
-    SessionKey: sessionKey,
-    AccountId: account.accountId,
-    ChatType: message.isGroup ? "group" : "direct",
-    ConversationLabel: fromLabel,
-    SenderName: message.senderName || "Unknown",
-    SenderId: message.senderId,
-    Provider: "team9" as const,
-    Surface: "team9" as const,
-    MessageSid: message.messageId,
-    Timestamp: message.timestamp.getTime(),
-    CommandAuthorized: true, // Allow commands from Team9
-    WasMentioned: message.isGroup ? effectiveWasMentioned : undefined,
-    OriginatingChannel: "team9" as const,
-    OriginatingTo: to,
-  });
-
-  // Streaming state
-  const streamId = globalThis.crypto.randomUUID();
-  let streamStarted = false;
-  let accumulatedThinking = "";
-
-  // Create reply dispatcher that sends responses back to Team9
-  const { dispatcher, replyOptions, markDispatchIdle } =
-    runtime.channel.reply.createReplyDispatcherWithTyping({
-      humanDelay: runtime.channel.reply.resolveHumanDelayConfig(cfg, agentId),
-      deliver: async (payload: { text?: string }) => {
-        // Send reply to Team9, persist via HTTP API
-        if (payload.text) {
+        // Rebuild in the background
+        void (async () => {
           try {
-            const persistedMessage = await api.sendMessage(message.channelId, {
-              content: payload.text,
-              parentId: message.parentId,
-              ...(accumulatedThinking
-                ? { metadata: { thinking: accumulatedThinking } }
-                : {}),
-              // Skip HTTP broadcast during streaming; streaming_end will broadcast the final message
-              ...(streamStarted ? { skipBroadcast: true } : {}),
-            });
-
-            if (streamStarted) {
-              ws.emitStreamingEnd({
-                streamId,
-                channelId: message.channelId,
-                message: persistedMessage,
-              });
-              // Reset for next deliver call (multi-block scenario)
-              streamStarted = false;
-              accumulatedThinking = "";
-            }
+            conn.ws.disconnect();
+            activeConnections.delete(accountId);
+            const runtime = getTeam9Runtime();
+            const cfg = runtime.config.loadConfig();
+            const account = resolveTeam9Account({ cfg, accountId });
+            await getConnection(account, cfg);
+            console.log(`[Team9 Watchdog] Account ${accountId} reconnected successfully`);
           } catch (err) {
-            console.error(`[Team9] Failed to send reply:`, err);
-            if (streamStarted) {
-              ws.emitStreamingAbort({
-                streamId,
-                channelId: message.channelId,
-                reason: "error",
-                error: err instanceof Error ? err.message : String(err),
-              });
-              streamStarted = false;
-            }
+            console.error(`[Team9 Watchdog] Failed to rebuild connection for ${accountId}:`, err);
           }
-        }
-      },
-      onError: (err: unknown, info: { kind: string }) => {
-        console.error(`[Team9] Reply ${info.kind} failed:`, err);
-        if (streamStarted) {
-          ws.emitStreamingAbort({
-            streamId,
-            channelId: message.channelId,
-            reason: "error",
-            error: err instanceof Error ? err.message : String(err),
-          });
-          streamStarted = false;
-        }
-      },
-    });
-
-  // Dispatch the message to the agent with streaming callbacks
-  try {
-    await runtime.channel.reply.dispatchReplyFromConfig({
-      ctx,
-      cfg,
-      dispatcher,
-      replyOptions: {
-        ...replyOptions,
-        // Stream text content deltas to the client
-        onPartialReply: async (payload: { text?: string }) => {
-          if (!payload.text) return;
-          if (!streamStarted) {
-            streamStarted = true;
-            ws.emitStreamingStart({
-              streamId,
-              channelId: message.channelId,
-              parentId: message.parentId,
-            });
-          }
-          ws.emitStreamingDelta({
-            streamId,
-            channelId: message.channelId,
-            content: payload.text,
-          });
-        },
-        // Stream thinking/reasoning deltas to the client
-        onReasoningStream: async (payload: { text?: string }) => {
-          if (!payload.text) return;
-          if (!streamStarted) {
-            streamStarted = true;
-            ws.emitStreamingStart({
-              streamId,
-              channelId: message.channelId,
-              parentId: message.parentId,
-            });
-          }
-          accumulatedThinking = payload.text;
-          ws.emitStreamingThinkingDelta({
-            streamId,
-            channelId: message.channelId,
-            content: payload.text,
-          });
-        },
-      },
-    });
-  } catch (err) {
-    console.error(`[Team9] Failed to dispatch message:`, err);
-    if (streamStarted) {
-      ws.emitStreamingAbort({
-        streamId,
-        channelId: message.channelId,
-        reason: "error",
-        error: err instanceof Error ? err.message : String(err),
-      });
-      streamStarted = false;
+        })();
+      }
     }
-  } finally {
-    markDispatchIdle();
+  }, 60_000); // Check every 60 seconds
+}
+
+function stopWatchdog(): void {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
   }
+  watchdogFailures.clear();
 }
 
 /**
- * Get or create connection for an account
+ * Get or create connection for an account.
+ * Used by outbound methods (sendText, sendMedia, actions).
  */
 async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig) {
   const existing = activeConnections.get(account.accountId);
@@ -404,34 +112,38 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     return existing;
   }
 
-  // Token is required (from env var TEAM9_TOKEN or config)
   if (!account.token) {
     throw new Error("No token available for Team9 connection. Set TEAM9_TOKEN env var.");
   }
 
-  // Create new connection with token
   const api = new Team9ApiClient(account.baseUrl, account.token);
-  const token = account.token;
+
+  // Create monitor context (botUserId/botUsername set during onAuthenticated)
+  const monitorCtx = createTeam9MonitorContext({
+    account,
+    api,
+    ws: null as unknown as Team9WebSocketClient, // set after ws creation
+    cfg,
+  });
+
+  // Create debouncer-based message handler
+  const messageHandler = createTeam9MessageHandler(monitorCtx);
 
   const ws = createTeam9WsClient(
-    { ...account, token },
+    { ...account, token: account.token },
     {
-      onMessage: (message) => {
-        // Forward message to OpenClaw agent for processing
-        void handleIncomingMessage(message, account, api, ws, cfg);
-      },
+      onMessage: messageHandler,
       onConnect: () => {
         console.log(`[Team9] WebSocket connected for account: ${account.accountId}`);
       },
       onAuthenticated: async (userId) => {
-        // Store bot's user ID for self-message filtering
-        currentBotUserId = userId;
+        monitorCtx.botUserId = userId;
         console.log(`[Team9] Bot user ID set to: ${userId}`);
 
         // Fetch bot user profile for mention detection in group messages
         try {
           const me = await api.getMe();
-          currentBotUsername = me.username ?? null;
+          monitorCtx.botUsername = me.username ?? null;
           console.log(`[Team9] Bot username: ${me.username}, displayName: ${me.displayName ?? "none"}`);
         } catch (err) {
           console.warn(`[Team9] Failed to fetch bot user profile, mention detection may be limited:`, err);
@@ -443,17 +155,24 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
           console.log(`[Team9] Joining ${channels.length} existing channels...`);
           for (const channel of channels) {
             console.log(`[Team9]   -> channel: ${channel.id} type=${channel.type} name=${channel.name}`);
-            // Cache channel type for isGroup determination in incoming messages
             ws.setChannelType(channel.id, channel.type);
             ws.joinChannel(channel.id);
           }
           console.log(`[Team9] Joined all channels successfully`);
+
+          // Cache tenantId from channel metadata for file API operations
+          if (!api.getTenantId()) {
+            const firstWithTenant = channels.find((ch) => ch.tenantId);
+            if (firstWithTenant?.tenantId) {
+              api.setTenantId(firstWithTenant.tenantId);
+              console.log(`[Team9] Cached tenantId: ${firstWithTenant.tenantId}`);
+            }
+          }
         } catch (err) {
           console.error(`[Team9] Failed to join existing channels:`, err);
         }
       },
       onChannelJoined: async (channelId) => {
-        // Fetch channel metadata to cache the type for isGroup determination
         try {
           const channel = await api.getChannel(channelId);
           ws.setChannelType(channel.id, channel.type);
@@ -471,6 +190,9 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     }
   );
 
+  // Complete the monitor context with the ws reference
+  monitorCtx.ws = ws;
+
   try {
     await ws.connect();
   } catch (err) {
@@ -484,8 +206,12 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
     throw err;
   }
 
-  const connection = { api, ws };
+  const connection = { api, ws, monitorCtx };
   activeConnections.set(account.accountId, connection);
+
+  // Start the connection watchdog when the first connection is created
+  startWatchdog();
+
   return connection;
 }
 
@@ -498,7 +224,6 @@ async function sendTeam9Message(
   options?: {
     accountId?: string;
     replyTo?: string;
-    mediaUrl?: string;
   }
 ): Promise<{
   messageId?: string;
@@ -507,7 +232,7 @@ async function sendTeam9Message(
 }> {
   try {
     const runtime = getTeam9Runtime();
-    const cfg = runtime.config.get();
+    const cfg = runtime.config.loadConfig();
     const account = resolveTeam9Account({
       cfg,
       accountId: options?.accountId,
@@ -519,11 +244,10 @@ async function sendTeam9Message(
 
     const { api } = await getConnection(account, cfg);
 
-    // Parse target: could be channelId or user:userId
-    let channelId = to;
-    if (to.startsWith("user:")) {
-      const userId = to.replace("user:", "");
-      // Get or create DM channel
+    // Parse target: could be team9:channelId, user:userId, or bare channelId
+    let channelId = to.startsWith("team9:") ? to.slice(6) : to;
+    if (channelId.startsWith("user:")) {
+      const userId = channelId.replace("user:", "");
       const dmChannel = await api.getOrCreateDmChannel(userId);
       channelId = dmChannel.id;
     }
@@ -558,7 +282,6 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
     quickstartAllowFrom: true,
   },
 
-  // Onboarding adapter for `openclaw onboard` wizard
   onboarding: team9OnboardingAdapter,
 
   capabilities: {
@@ -586,7 +309,7 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
     describeAccount: (account) => describeTeam9Account(account),
 
     setAccountEnabled: ({ cfg, accountId, enabled }) => {
-      const team9Config = cfg.channels?.team9;
+      const team9Config = cfg.channels?.team9 as Team9Config | undefined;
       if (!team9Config) return cfg;
 
       if (accountId === "default") {
@@ -621,7 +344,7 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
     },
 
     deleteAccount: ({ cfg, accountId }) => {
-      const team9Config = cfg.channels?.team9;
+      const team9Config = cfg.channels?.team9 as Team9Config | undefined;
       if (!team9Config?.accounts) return cfg;
 
       const { [accountId]: _, ...remainingAccounts } = team9Config.accounts;
@@ -659,14 +382,14 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
   setup: {
     validateInput: ({ input }) => {
-      if (!input.baseUrl && !input.token && !input.username) {
-        return "Team9 requires either baseUrl+token or credentials (username/password)";
+      if (!input.url && !input.token) {
+        return "Team9 requires a server URL and bot token";
       }
       return null;
     },
 
     applyAccountConfig: ({ cfg, accountId, input }) =>
-      applyTeam9AccountConfig({ cfg, accountId, input }),
+      applyTeam9AccountConfig({ cfg, accountId, input: { baseUrl: input.url, token: input.token } }),
   },
 
   // ==================== Message Sending ====================
@@ -682,23 +405,77 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         replyTo: replyToId ?? undefined,
       });
       return {
-        channel: "team9",
-        ...result,
+        channel: "team9" as const,
+        messageId: result.messageId ?? "",
+        status: result.status,
+        error: result.error,
       };
     },
 
     sendMedia: async ({ to, text, mediaUrl, accountId, replyToId }) => {
-      // For now, just send text with media URL
-      // TODO: Implement proper file upload to Team9
-      const messageText = mediaUrl ? `${text}\n\n${mediaUrl}` : text;
-      const result = await sendTeam9Message(to, messageText, {
-        accountId: accountId ?? undefined,
-        replyTo: replyToId ?? undefined,
-      });
-      return {
-        channel: "team9",
-        ...result,
-      };
+      try {
+        const runtime = getTeam9Runtime();
+        const cfg = runtime.config.loadConfig();
+        const account = resolveTeam9Account({
+          cfg,
+          accountId: accountId ?? undefined,
+        });
+
+        if (!isTeam9AccountConfigured(account)) {
+          return { channel: "team9" as const, messageId: "", status: "failed" as const, error: "Account not configured" };
+        }
+
+        const { api } = await getConnection(account, cfg);
+
+        let channelId = to.startsWith("team9:") ? to.slice(6) : to;
+        if (channelId.startsWith("user:")) {
+          const userId = channelId.replace("user:", "");
+          const dmChannel = await api.getOrCreateDmChannel(userId);
+          channelId = dmChannel.id;
+        }
+
+        let attachments: Team9OutboundAttachment[] | undefined;
+
+        if (mediaUrl) {
+          try {
+            const media = await runtime.media.loadWebMedia(mediaUrl);
+            const fileName = media.fileName ?? "upload";
+            const contentType = media.contentType ?? "application/octet-stream";
+
+            const attachment = await uploadMediaToTeam9(api, {
+              buffer: media.buffer,
+              fileName,
+              contentType,
+              channelId,
+            });
+            attachments = [attachment];
+          } catch (err) {
+            console.error(`[Team9] Failed to upload media, falling back to URL in text: ${String(err)}`);
+            text = mediaUrl ? `${text}\n\n${mediaUrl}` : text;
+          }
+        }
+
+        const message = await api.sendMessage(channelId, {
+          content: text || "",
+          parentId: replyToId ?? undefined,
+          attachments,
+        });
+
+        return {
+          channel: "team9" as const,
+          messageId: message.id,
+          status: "sent" as const,
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`[Team9] Failed to send media message:`, errorMessage);
+        return {
+          channel: "team9" as const,
+          messageId: "",
+          status: "failed" as const,
+          error: errorMessage,
+        };
+      }
     },
   },
 
@@ -706,7 +483,6 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
   threading: {
     resolveReplyToMode: ({ cfg }) => {
-      // Team9 supports threading via parentId
       return "first";
     },
   },
@@ -715,17 +491,14 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
   messaging: {
     normalizeTarget: (target) => {
-      // Support formats: channelId, user:userId, channel:channelId
       if (target.startsWith("user:") || target.startsWith("channel:")) {
         return target;
       }
-      // Assume it's a channel ID
       return target;
     },
 
     targetResolver: {
       looksLikeId: (id) => {
-        // Team9 uses UUIDs
         return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
           id
         );
@@ -737,72 +510,42 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
   // ==================== Actions ====================
 
   actions: {
-    editMessage: async ({ messageId, text, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
+    listActions: () => {
+      return ["send", "edit", "delete", "react"];
+    },
 
+    handleAction: async ({ action, params, cfg, accountId }) => {
+      const account = resolveTeam9Account({ cfg, accountId });
+      const { api } = await getConnection(account, cfg);
+
+      if (action === "edit") {
+        const messageId = readStringParam(params, "messageId", { required: true, label: "messageId" });
+        const text = readStringParam(params, "text", { required: true, label: "text" });
         await api.updateMessage(messageId, text);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return jsonResult({ ok: true, edited: messageId });
       }
-    },
 
-    deleteMessage: async ({ messageId, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
-
+      if (action === "delete") {
+        const messageId = readStringParam(params, "messageId", { required: true, label: "messageId" });
         await api.deleteMessage(messageId);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return jsonResult({ ok: true, deleted: messageId });
       }
-    },
 
-    addReaction: async ({ messageId, emoji, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
+      if (action === "react") {
+        const messageId = readStringParam(params, "messageId", { required: true, label: "messageId" });
+        const emoji = readStringParam(params, "emoji", { required: true, label: "emoji" });
+        const remove = typeof params.remove === "boolean" ? params.remove : false;
+
+        if (remove) {
+          await api.removeReaction(messageId, emoji);
+          return jsonResult({ ok: true, removed: emoji });
+        }
 
         await api.addReaction(messageId, emoji);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
+        return jsonResult({ ok: true, added: emoji });
       }
-    },
 
-    removeReaction: async ({ messageId, emoji, accountId }) => {
-      try {
-        const runtime = getTeam9Runtime();
-        const cfg = runtime.config.get();
-        const account = resolveTeam9Account({ cfg, accountId });
-        const { api } = await getConnection(account, cfg);
-
-        await api.removeReaction(messageId, emoji);
-        return { success: true };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
+      throw new Error(`Action ${action} not supported for team9.`);
     },
   },
 
@@ -839,7 +582,13 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
       if (connection) {
         connection.ws.disconnect();
         activeConnections.delete(account.accountId);
+        watchdogFailures.delete(account.accountId);
         console.log(`[Team9] Account ${account.accountId} stopped`);
+      }
+
+      // Stop the watchdog when no connections remain
+      if (activeConnections.size === 0) {
+        stopWatchdog();
       }
     },
   },
@@ -857,8 +606,10 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         return { status: "disconnected" };
       }
 
+      const active = connection.ws.isActive();
+      const healthy = connection.ws.isHealthy();
       return {
-        status: connection.ws.isActive() ? "connected" : "disconnected",
+        status: active && healthy ? "connected" : "disconnected",
         baseUrl: account.baseUrl,
       };
     },

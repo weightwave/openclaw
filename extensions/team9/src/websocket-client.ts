@@ -30,10 +30,11 @@ export class Team9WebSocketClient {
   private socket: Socket | null = null;
   private options: Team9WsClientOptions;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private isConnected = false;
   private channelTypes = new Map<string, "direct" | "public" | "private">();
+  private lastActivityAt = 0;
+  private missedPongs = 0;
 
   constructor(options: Team9WsClientOptions) {
     this.options = options;
@@ -50,9 +51,9 @@ export class Team9WebSocketClient {
             token: this.options.token,
           },
           reconnection: true,
-          reconnectionAttempts: this.maxReconnectAttempts,
+          reconnectionAttempts: Infinity,
           reconnectionDelay: 1000,
-          reconnectionDelayMax: 5000,
+          // No reconnectionDelayMax — allow unbounded exponential backoff
         });
 
         this.setupEventHandlers();
@@ -90,9 +91,10 @@ export class Team9WebSocketClient {
   private setupEventHandlers(): void {
     if (!this.socket) return;
 
-    // Debug: log ALL socket.io events to diagnose missing messages
+    // Track activity on ALL socket.io events for health monitoring
     this.socket.onAny((eventName: string, ...args: unknown[]) => {
-      if (eventName === "pong" || eventName === "user_online" || eventName === "user_offline") return;
+      this.lastActivityAt = Date.now();
+      if (eventName === "user_online" || eventName === "user_offline") return;
       const preview = args.length > 0 ? JSON.stringify(args[0]).substring(0, 200) : "";
       console.log(`[Team9 WS DEBUG] Event: ${eventName} ${preview}`);
     });
@@ -101,6 +103,8 @@ export class Team9WebSocketClient {
     this.socket.on("connect", () => {
       console.log(`[Team9 WS] Connected to server`);
       this.reconnectAttempts = 0;
+      this.lastActivityAt = Date.now();
+      this.missedPongs = 0;
     });
 
     this.socket.on("disconnect", (reason) => {
@@ -196,11 +200,7 @@ export class Team9WebSocketClient {
       }
     );
 
-    // Pong response
-    this.socket.on("pong", (data: { timestamp: number; serverTime: number }) => {
-      const latency = Date.now() - data.timestamp;
-      console.log(`[Team9 WS] Pong received, latency: ${latency}ms`);
-    });
+    // Note: pong is received via ack callback in startHeartbeat(), not as a named event
   }
 
   private handleIncomingMessage(message: Team9Message): void {
@@ -222,11 +222,29 @@ export class Team9WebSocketClient {
   }
 
   private startHeartbeat(): void {
-    // Send ping every 30 seconds
+    this.missedPongs = 0;
+    this.lastActivityAt = Date.now();
+
+    // Send ping every 30 seconds; detect dead connections via missed pongs
     this.heartbeatInterval = setInterval(() => {
-      if (this.socket && this.isConnected) {
-        this.socket.emit("ping", { timestamp: Date.now() });
+      if (!this.socket || !this.isConnected) return;
+
+      if (this.missedPongs >= 3) {
+        // 3 consecutive pings with no pong (~90s) — connection is dead
+        console.error(
+          `[Team9 WS] Connection appears dead (${this.missedPongs} missed pongs), forcing reconnect`,
+        );
+        this.missedPongs = 0;
+        this.socket.disconnect(); // triggers Socket.io reconnection
+        return;
       }
+
+      this.missedPongs++;
+      this.socket.emit("ping", { timestamp: Date.now() }, (pong: { timestamp: number; serverTime: number }) => {
+        this.missedPongs = 0;
+        const latency = Date.now() - pong.timestamp;
+        console.log(`[Team9 WS] Pong received, latency: ${latency}ms`);
+      });
     }, 30000);
   }
 
@@ -352,6 +370,21 @@ export class Team9WebSocketClient {
 
   isActive(): boolean {
     return this.isConnected && this.socket?.connected === true;
+  }
+
+  /**
+   * Returns true if the connection has received any activity within the last 3 minutes.
+   * Use this as a deeper health check beyond isActive() — a half-open socket may
+   * report isActive()=true while isHealthy()=false.
+   */
+  isHealthy(): boolean {
+    if (!this.isActive()) return false;
+    const staleThresholdMs = 3 * 60 * 1000; // 3 minutes
+    return Date.now() - this.lastActivityAt < staleThresholdMs;
+  }
+
+  getLastActivityAt(): number {
+    return this.lastActivityAt;
   }
 
   getSocket(): Socket | null {
