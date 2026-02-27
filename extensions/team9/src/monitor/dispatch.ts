@@ -13,14 +13,44 @@ import { getTeam9Runtime } from "../runtime.js";
 import { uploadMediaToTeam9 } from "../media.js";
 
 /**
+ * Resolve the parentId for a bot reply.
+ *
+ * - Root message where bot was @mentioned: reply as thread (parentId = message ID)
+ * - Thread message: stay in the same thread (parentId = message's parentId)
+ * - All other cases: use message's original parentId
+ */
+function resolveReplyParentId(
+  prepared: PreparedTeam9Message,
+): string | undefined {
+  const { message, wasBotMentioned } = prepared;
+
+  if (!message.parentId && wasBotMentioned) {
+    // Bot was @mentioned in a root message — create a new thread
+    return message.messageId;
+  }
+
+  // Thread message or non-mentioned root — keep original parentId
+  return message.parentId;
+}
+
+/**
  * Dispatch a prepared message to the AI agent and deliver replies.
  */
 export async function dispatchPreparedTeam9Message(
   prepared: PreparedTeam9Message,
 ): Promise<void> {
-  const { ctx, message, ctxPayload, route } = prepared;
+  const { ctx, message, ctxPayload, route, wasBotMentioned } = prepared;
   const runtime = getTeam9Runtime();
   const channelId = message.channelId;
+  const replyParentId = resolveReplyParentId(prepared);
+
+  // Track this thread for auto-reply if bot was @mentioned in a root message
+  if (!message.parentId && wasBotMentioned) {
+    ctx.activeBotThreads.add(message.messageId);
+    console.log(
+      `[Team9] Registered active bot thread: rootId=${message.messageId}`,
+    );
+  }
 
   // Create reply dispatcher with typing indicator callbacks
   const { dispatcher, replyOptions, markDispatchIdle } =
@@ -35,7 +65,7 @@ export async function dispatchPreparedTeam9Message(
 
         if (!text && mediaUrls.length === 0) {
           console.warn(
-            `[Team9] Skipping empty reply for channel=${channelId} parentId=${message.parentId} (no text, no media)`,
+            `[Team9] Skipping empty reply for channel=${channelId} parentId=${replyParentId} (no text, no media)`,
           );
           return;
         }
@@ -63,11 +93,11 @@ export async function dispatchPreparedTeam9Message(
             }
 
             console.log(
-              `[Team9] Sending reply: channel=${channelId} textLen=${text.length} media=${attachments.length}/${mediaUrls.length}`,
+              `[Team9] Sending reply: channel=${channelId} parentId=${replyParentId} textLen=${text.length} media=${attachments.length}/${mediaUrls.length}`,
             );
             const sent = await ctx.api.sendMessage(channelId, {
               content: text,
-              parentId: message.parentId,
+              parentId: replyParentId,
               attachments:
                 attachments.length > 0 ? attachments : undefined,
             });
@@ -77,11 +107,11 @@ export async function dispatchPreparedTeam9Message(
           } else {
             // Text-only reply
             console.log(
-              `[Team9] Sending reply: channel=${channelId} textLen=${text.length}`,
+              `[Team9] Sending reply: channel=${channelId} parentId=${replyParentId} textLen=${text.length}`,
             );
             const sent = await ctx.api.sendMessage(channelId, {
               content: text,
-              parentId: message.parentId,
+              parentId: replyParentId,
             });
             console.log(
               `[Team9] Reply delivered: messageId=${sent.id} channel=${channelId}`,

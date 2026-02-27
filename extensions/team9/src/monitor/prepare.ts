@@ -30,6 +30,8 @@ export type PreparedTeam9Message = {
   ctxPayload: { CommandAuthorized: boolean } & Record<string, unknown>;
   channelId: string;
   route: { agentId?: string | null; sessionKey: string; matchedBy?: string };
+  // Whether the bot was explicitly @mentioned in this message (used by dispatch for thread creation)
+  wasBotMentioned: boolean;
 };
 
 /**
@@ -108,8 +110,40 @@ export async function prepareTeam9Message(params: {
   });
   const agentId = route.agentId;
 
+  // ===== Thread auto-reply: skip mention check for active bot threads =====
+  let isActiveBotThread = false;
+
+  if (message.isGroup && message.parentId) {
+    // Check if this thread root is already tracked as an active bot thread
+    if (ctx.activeBotThreads.has(message.parentId)) {
+      isActiveBotThread = true;
+      console.log(
+        `[Team9] Active bot thread detected: rootId=${message.parentId}, skipping mention check`,
+      );
+    } else {
+      // Restart recovery: query the root message to check if bot was mentioned
+      try {
+        const rootMessage = await ctx.api.getMessage(message.parentId);
+        const rootMentions = extractMentionedUserIds(rootMessage.content);
+        if (ctx.botUserId && rootMentions.has(ctx.botUserId)) {
+          isActiveBotThread = true;
+          ctx.activeBotThreads.add(message.parentId);
+          console.log(
+            `[Team9] Recovered active bot thread from root message: rootId=${message.parentId}`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[Team9] Failed to fetch root message ${message.parentId} for thread detection:`,
+          err,
+        );
+      }
+    }
+  }
+
   // ===== Mention-based filtering for group messages =====
   let effectiveWasMentioned: boolean | undefined;
+  let explicitlyMentioned = false;
 
   if (message.isGroup) {
     const requireMention = resolveTeam9GroupRequireMention({
@@ -125,7 +159,7 @@ export async function prepareTeam9Message(params: {
     );
 
     // Detect explicit @-mention of the bot
-    const explicitlyMentioned = Boolean(
+    explicitlyMentioned = Boolean(
       ctx.botUserId && mentionedUserIds.has(ctx.botUserId),
     );
     const hasAnyMention =
@@ -167,14 +201,16 @@ export async function prepareTeam9Message(params: {
       commandAuthorized: true,
     });
 
-    if (mentionGate.shouldSkip) {
+    if (mentionGate.shouldSkip && !isActiveBotThread) {
       console.log(
         `[Team9] Skipping group message in channel ${message.channelId} (mention required but not mentioned)`,
       );
       return null;
     }
 
-    effectiveWasMentioned = mentionGate.effectiveWasMentioned;
+    effectiveWasMentioned = isActiveBotThread
+      ? true
+      : mentionGate.effectiveWasMentioned;
   }
 
   const sessionKey = route.sessionKey;
@@ -222,5 +258,6 @@ export async function prepareTeam9Message(params: {
     ctxPayload,
     channelId: message.channelId,
     route,
+    wasBotMentioned: explicitlyMentioned,
   };
 }

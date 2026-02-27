@@ -19,6 +19,8 @@ export type Team9MonitorContext = {
   // Bot identity — set during onAuthenticated
   botUserId: string | null;
   botUsername: string | null;
+  // Thread IDs where bot was @mentioned — auto-reply without mention in these threads
+  activeBotThreads: Set<string>;
 };
 
 export function createTeam9MonitorContext(params: {
@@ -35,5 +37,6 @@ export function createTeam9MonitorContext(params: {
     cfg: params.cfg,
     botUserId: null,
     botUsername: null,
+    activeBotThreads: new Set(),
   };
 }
