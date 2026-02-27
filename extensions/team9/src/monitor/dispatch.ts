@@ -15,21 +15,32 @@ import { uploadMediaToTeam9 } from "../media.js";
 /**
  * Resolve the parentId for a bot reply.
  *
- * - Root message where bot was @mentioned: reply as thread (parentId = message ID)
- * - Thread message: stay in the same thread (parentId = message's parentId)
- * - All other cases: use message's original parentId
+ * Thread nesting rules (max 2 levels):
+ * - @mentioned in root message (depth 0): create depth-1 thread (parentId = message ID)
+ * - @mentioned in depth-1 thread: create depth-2 thread (parentId = message ID)
+ * - @mentioned in depth-2 thread: stay in same thread (parentId = message's parentId)
+ * - Not @mentioned (auto-reply in thread): stay in same thread
  */
 function resolveReplyParentId(
   prepared: PreparedTeam9Message,
 ): string | undefined {
-  const { message, wasBotMentioned } = prepared;
+  const { ctx, message, wasBotMentioned } = prepared;
 
-  if (!message.parentId && wasBotMentioned) {
-    // Bot was @mentioned in a root message — create a new thread
-    return message.messageId;
+  if (wasBotMentioned) {
+    if (!message.parentId) {
+      // @mentioned in root message — create depth-1 thread
+      return message.messageId;
+    }
+
+    const currentDepth = ctx.activeBotThreads.get(message.parentId);
+    if (currentDepth !== undefined && currentDepth < 2) {
+      // @mentioned in a thread that hasn't reached max depth — create nested thread
+      return message.messageId;
+    }
+
+    // Already at max depth (2) or not in a tracked thread — stay in same thread
   }
 
-  // Thread message or non-mentioned root — keep original parentId
   return message.parentId;
 }
 
@@ -44,12 +55,24 @@ export async function dispatchPreparedTeam9Message(
   const channelId = message.channelId;
   const replyParentId = resolveReplyParentId(prepared);
 
-  // Track this thread for auto-reply if bot was @mentioned in a root message
-  if (!message.parentId && wasBotMentioned) {
-    ctx.activeBotThreads.add(message.messageId);
-    console.log(
-      `[Team9] Registered active bot thread: rootId=${message.messageId}`,
-    );
+  // Track this thread for auto-reply if bot was @mentioned and a new thread is created
+  if (wasBotMentioned) {
+    if (!message.parentId) {
+      // @mentioned in root → new depth-1 thread
+      ctx.activeBotThreads.set(message.messageId, 1);
+      console.log(
+        `[Team9] Registered active bot thread: rootId=${message.messageId} depth=1`,
+      );
+    } else {
+      const currentDepth = ctx.activeBotThreads.get(message.parentId);
+      if (currentDepth !== undefined && currentDepth < 2) {
+        // @mentioned in depth-1 thread → new depth-2 nested thread
+        ctx.activeBotThreads.set(message.messageId, 2);
+        console.log(
+          `[Team9] Registered nested active bot thread: rootId=${message.messageId} depth=2`,
+        );
+      }
+    }
   }
 
   // Create reply dispatcher with typing indicator callbacks

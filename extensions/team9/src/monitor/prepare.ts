@@ -118,23 +118,33 @@ export async function prepareTeam9Message(params: {
     if (ctx.activeBotThreads.has(message.parentId)) {
       isActiveBotThread = true;
       console.log(
-        `[Team9] Active bot thread detected: rootId=${message.parentId}, skipping mention check`,
+        `[Team9] Active bot thread detected: rootId=${message.parentId} depth=${ctx.activeBotThreads.get(message.parentId)}, skipping mention check`,
       );
     } else {
-      // Restart recovery: query the root message to check if bot was mentioned
+      // Restart recovery: query the parent message to check if bot was mentioned
       try {
-        const rootMessage = await ctx.api.getMessage(message.parentId);
-        const rootMentions = extractMentionedUserIds(rootMessage.content);
-        if (ctx.botUserId && rootMentions.has(ctx.botUserId)) {
+        const parentMessage = await ctx.api.getMessage(message.parentId);
+        const parentMentions = extractMentionedUserIds(parentMessage.content);
+        const parentSentByBot =
+          ctx.botUserId && parentMessage.senderId === ctx.botUserId;
+        if (
+          parentSentByBot ||
+          (ctx.botUserId && parentMentions.has(ctx.botUserId))
+        ) {
           isActiveBotThread = true;
-          ctx.activeBotThreads.add(message.parentId);
+          // Determine thread depth: if parent has no parentId → depth 1, otherwise depth 2
+          const depth = parentMessage.parentId ? 2 : 1;
+          ctx.activeBotThreads.set(message.parentId, depth);
+          const reason = parentSentByBot
+            ? "bot is parent author"
+            : "bot was mentioned in parent";
           console.log(
-            `[Team9] Recovered active bot thread from root message: rootId=${message.parentId}`,
+            `[Team9] Recovered active bot thread from parent message (${reason}): rootId=${message.parentId} depth=${depth}`,
           );
         }
       } catch (err) {
         console.warn(
-          `[Team9] Failed to fetch root message ${message.parentId} for thread detection:`,
+          `[Team9] Failed to fetch parent message ${message.parentId} for thread detection:`,
           err,
         );
       }
