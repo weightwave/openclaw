@@ -110,20 +110,29 @@ export async function prepareTeam9Message(params: {
   });
   const agentId = route.agentId;
 
-  // ===== Thread auto-reply: skip mention check for active bot threads =====
+  // ===== Thread auto-reply and parent context =====
   let isActiveBotThread = false;
+  let parentMessageContent: string | undefined;
+  let parentMessageSender: string | undefined;
 
-  if (message.isGroup && message.parentId) {
-    // Check if this thread root is already tracked as an active bot thread
-    if (ctx.activeBotThreads.has(message.parentId)) {
+  if (message.parentId) {
+    // Check tracked threads first (no API call needed)
+    if (message.isGroup && ctx.activeBotThreads.has(message.parentId)) {
       isActiveBotThread = true;
       console.log(
         `[Team9] Active bot thread detected: rootId=${message.parentId} depth=${ctx.activeBotThreads.get(message.parentId)}, skipping mention check`,
       );
-    } else {
-      // Restart recovery: query the parent message to check if bot was mentioned
-      try {
-        const parentMessage = await ctx.api.getMessage(message.parentId);
+    }
+
+    // Fetch parent message for thread context and (if needed) recovery detection
+    try {
+      const parentMessage = await ctx.api.getMessage(message.parentId);
+      parentMessageContent = stripHtml(parentMessage.content);
+      parentMessageSender =
+        parentMessage.sender?.displayName || parentMessage.sender?.username;
+
+      // Recovery: detect active bot thread from parent message
+      if (message.isGroup && !isActiveBotThread) {
         const parentMentions = extractMentionedUserIds(parentMessage.content);
         const parentSentByBot =
           ctx.botUserId && parentMessage.senderId === ctx.botUserId;
@@ -142,12 +151,12 @@ export async function prepareTeam9Message(params: {
             `[Team9] Recovered active bot thread from parent message (${reason}): rootId=${message.parentId} depth=${depth}`,
           );
         }
-      } catch (err) {
-        console.warn(
-          `[Team9] Failed to fetch parent message ${message.parentId} for thread detection:`,
-          err,
-        );
       }
+    } catch (err) {
+      console.warn(
+        `[Team9] Failed to fetch parent message ${message.parentId}:`,
+        err,
+      );
     }
   }
 
@@ -239,8 +248,26 @@ export async function prepareTeam9Message(params: {
 
   const to = `team9:${message.channelId}`;
 
+  // When replying in a thread, prepend parent message content so the AI
+  // knows which message the user is referring to (prevents responding to
+  // the latest message instead of the one being replied to).
+  let bodyWithThreadContext = effectiveBody;
+  if (parentMessageContent && message.parentId) {
+    const senderLabel = parentMessageSender
+      ? ` from ${parentMessageSender}`
+      : "";
+    const preview =
+      parentMessageContent.length > 500
+        ? parentMessageContent.substring(0, 500) + "..."
+        : parentMessageContent;
+    bodyWithThreadContext = `[Replying to message${senderLabel}: "${preview}"]\n\n${effectiveBody}`;
+    console.log(
+      `[Team9] Injected parent message context for thread reply (parentId=${message.parentId})`,
+    );
+  }
+
   const ctxPayload = runtime.channel.reply.finalizeInboundContext({
-    Body: effectiveBody,
+    Body: bodyWithThreadContext,
     RawBody: message.content,
     CommandBody: plainContent || effectiveBody,
     From: to,

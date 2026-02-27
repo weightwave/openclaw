@@ -39,7 +39,10 @@ export function createTeam9MessageHandler(
     buildKey: (entry) => {
       const { message } = entry;
       if (!message.senderId) return null;
-      return `team9:${ctx.accountId}:${message.channelId}:${message.senderId}`;
+      // Include parentId in debounce key so messages in different threads
+      // are not merged together (each thread gets its own debounce group)
+      const threadKey = message.parentId ?? "root";
+      return `team9:${ctx.accountId}:${message.channelId}:${message.senderId}:${threadKey}`;
     },
 
     shouldDebounce: (entry) => {
