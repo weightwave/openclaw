@@ -31,8 +31,8 @@ export class Team9WebSocketClient {
   private options: Team9WsClientOptions;
   private reconnectAttempts = 0;
   private heartbeatInterval: NodeJS.Timeout | null = null;
-  private isConnected = false;
   private channelTypes = new Map<string, "direct" | "public" | "private">();
+  private pendingChannelJoins = new Set<string>();
   private lastActivityAt = 0;
   private missedPongs = 0;
 
@@ -58,14 +58,9 @@ export class Team9WebSocketClient {
 
         this.setupEventHandlers();
 
-        // Wait for authentication
-        this.socket.once("authenticated", (data: { userId: string }) => {
-          console.log(`[Team9 WS] Authenticated as user: ${data.userId}`);
-          this.isConnected = true;
-          this.startHeartbeat();
-          this.options.onConnect?.();
-          // Notify about authentication so caller can join existing channels
-          this.options.onAuthenticated?.(data.userId);
+        // Resolve promise on initial authentication.
+        // Reconnection auth is handled persistently in setupEventHandlers().
+        this.socket.once("authenticated", () => {
           resolve();
         });
 
@@ -109,9 +104,17 @@ export class Team9WebSocketClient {
 
     this.socket.on("disconnect", (reason) => {
       console.log(`[Team9 WS] Disconnected: ${reason}`);
-      this.isConnected = false;
       this.stopHeartbeat();
       this.options.onDisconnect?.(reason);
+    });
+
+    // Persistent authenticated handler — fires on initial auth AND every reconnection
+    this.socket.on("authenticated", (data: { userId: string }) => {
+      console.log(`[Team9 WS] Authenticated as user: ${data.userId}`);
+      this.startHeartbeat();
+      this.processPendingJoins();
+      this.options.onConnect?.();
+      this.options.onAuthenticated?.(data.userId);
     });
 
     this.socket.on("connect_error", (error) => {
@@ -222,12 +225,13 @@ export class Team9WebSocketClient {
   }
 
   private startHeartbeat(): void {
+    this.stopHeartbeat(); // Clear any existing interval on reconnection
     this.missedPongs = 0;
     this.lastActivityAt = Date.now();
 
     // Send ping every 30 seconds; detect dead connections via missed pongs
     this.heartbeatInterval = setInterval(() => {
-      if (!this.socket || !this.isConnected) return;
+      if (!this.socket?.connected) return;
 
       if (this.missedPongs >= 3) {
         // 3 consecutive pings with no pong (~90s) — connection is dead
@@ -266,46 +270,57 @@ export class Team9WebSocketClient {
   }
 
   joinChannel(channelId: string): void {
-    if (!this.socket || !this.isConnected) {
-      console.warn(`[Team9 WS] Cannot join channel: not connected`);
+    if (!this.socket?.connected) {
+      console.log(`[Team9 WS] Queuing channel join for: ${channelId}`);
+      this.pendingChannelJoins.add(channelId);
       return;
     }
     this.socket.emit("join_channel", { channelId });
   }
 
   leaveChannel(channelId: string): void {
-    if (!this.socket || !this.isConnected) return;
+    this.pendingChannelJoins.delete(channelId);
+    if (!this.socket?.connected) return;
     this.socket.emit("leave_channel", { channelId });
+  }
+
+  private processPendingJoins(): void {
+    if (!this.socket?.connected || this.pendingChannelJoins.size === 0) return;
+    console.log(`[Team9 WS] Processing ${this.pendingChannelJoins.size} pending channel joins`);
+    for (const channelId of this.pendingChannelJoins) {
+      this.socket.emit("join_channel", { channelId });
+    }
+    this.pendingChannelJoins.clear();
   }
 
   // ==================== Typing Status ====================
 
   startTyping(channelId: string): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("typing_start", { channelId });
   }
 
   stopTyping(channelId: string): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("typing_stop", { channelId });
   }
 
   // ==================== Read Status ====================
 
   markAsRead(channelId: string, messageId: string): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("mark_as_read", { channelId, messageId });
   }
 
   // ==================== Reactions ====================
 
   addReaction(messageId: string, emoji: string): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("add_reaction", { messageId, emoji });
   }
 
   removeReaction(messageId: string, emoji: string): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("remove_reaction", { messageId, emoji });
   }
 
@@ -316,7 +331,7 @@ export class Team9WebSocketClient {
     channelId: string;
     parentId?: string;
   }): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("streaming_start", data);
   }
 
@@ -325,7 +340,7 @@ export class Team9WebSocketClient {
     channelId: string;
     content: string;
   }): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("streaming_content", data);
   }
 
@@ -334,7 +349,7 @@ export class Team9WebSocketClient {
     channelId: string;
     content: string;
   }): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("streaming_thinking_content", data);
   }
 
@@ -343,7 +358,7 @@ export class Team9WebSocketClient {
     channelId: string;
     message: Team9Message;
   }): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("streaming_end", data);
   }
 
@@ -353,7 +368,7 @@ export class Team9WebSocketClient {
     reason: "error" | "cancelled" | "timeout" | "disconnect";
     error?: string;
   }): void {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket?.connected) return;
     this.socket.emit("streaming_abort", data);
   }
 
@@ -365,11 +380,10 @@ export class Team9WebSocketClient {
       this.socket.disconnect();
       this.socket = null;
     }
-    this.isConnected = false;
   }
 
   isActive(): boolean {
-    return this.isConnected && this.socket?.connected === true;
+    return this.socket?.connected === true;
   }
 
   /**
