@@ -269,6 +269,10 @@ export class Team9WebSocketClient {
     this.channelTypes.set(channelId, type);
   }
 
+  hasChannelType(channelId: string): boolean {
+    return this.channelTypes.has(channelId);
+  }
+
   joinChannel(channelId: string): void {
     if (!this.socket?.connected) {
       console.log(`[Team9 WS] Queuing channel join for: ${channelId}`);

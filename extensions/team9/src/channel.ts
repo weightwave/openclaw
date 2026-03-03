@@ -173,6 +173,9 @@ async function getConnection(account: ResolvedTeam9Account, cfg: OpenClawConfig)
         }
       },
       onChannelJoined: async (channelId) => {
+        // Type already cached (from onAuthenticated or channel_created) — skip API call
+        if (ws.hasChannelType(channelId)) return;
+
         try {
           const channel = await api.getChannel(channelId);
           ws.setChannelType(channel.id, channel.type);
