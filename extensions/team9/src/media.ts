@@ -28,7 +28,23 @@ export type Team9MediaPayload = {
 
 // ==================== Inbound: Download & Save ====================
 
-const INBOUND_MAX_BYTES = 5 * 1024 * 1024; // 5MB
+// Per-type limits aligned with OpenClaw core (src/media/constants.ts)
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024; // 6MB
+const MAX_AUDIO_BYTES = 16 * 1024 * 1024; // 16MB
+const MAX_VIDEO_BYTES = 16 * 1024 * 1024; // 16MB
+const MAX_DOCUMENT_BYTES = 100 * 1024 * 1024; // 100MB
+
+/**
+ * Return the inbound byte cap for a given MIME type,
+ * matching OpenClaw core media limits.
+ */
+function inboundMaxBytesForMime(mime?: string | null): number {
+  if (!mime) return MAX_DOCUMENT_BYTES;
+  if (mime.startsWith("image/")) return MAX_IMAGE_BYTES;
+  if (mime.startsWith("audio/")) return MAX_AUDIO_BYTES;
+  if (mime.startsWith("video/")) return MAX_VIDEO_BYTES;
+  return MAX_DOCUMENT_BYTES;
+}
 
 /**
  * Infer a placeholder tag from the MIME type.
@@ -85,7 +101,6 @@ async function resolveAttachmentUrl(
 export async function downloadTeam9Attachments(
   attachments: Team9MessageAttachment[],
   api: Team9ApiClient,
-  maxBytes: number = INBOUND_MAX_BYTES,
 ): Promise<Team9MediaInfo[]> {
   if (!attachments || attachments.length === 0) return [];
 
@@ -95,10 +110,12 @@ export async function downloadTeam9Attachments(
   for (const attachment of attachments) {
     try {
       const url = await resolveAttachmentUrl(attachment, api);
+      const maxBytes = inboundMaxBytesForMime(attachment.mimeType);
 
       const fetched = await runtime.channel.media.fetchRemoteMedia({
         url,
         filePathHint: attachment.fileName ?? url,
+        maxBytes,
       });
 
       const saved = await runtime.channel.media.saveMediaBuffer(
