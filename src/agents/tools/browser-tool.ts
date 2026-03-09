@@ -249,8 +249,15 @@ export function createBrowserTool(opts?: {
       }
 
       if (!target && !requestedNode && profile === "chrome") {
-        // Chrome extension relay takeover is a host Chrome feature; prefer host unless explicitly targeting a node.
-        target = "host";
+        // Chrome extension relay is a host-only feature.  However, when a
+        // browser-capable node (e.g. aHand) is connected, routing through it
+        // gives access to the user's local browser without requiring the
+        // Chrome extension.  Only fall back to "host" when no node is available.
+        const nodes = await listNodes({});
+        const hasBrowserNode = nodes.some((n) => n.connected && isBrowserNode(n));
+        if (!hasBrowserNode) {
+          target = "host";
+        }
       }
 
       const nodeTarget = await resolveBrowserNodeTarget({

@@ -224,7 +224,7 @@ describe("browser tool snapshot maxChars", () => {
     expect(gatewayMocks.callGatewayTool).not.toHaveBeenCalled();
   });
 
-  it("keeps chrome profile on host when node proxy is available", async () => {
+  it("routes chrome profile to node when browser node is available", async () => {
     nodesUtilsMocks.listNodes.mockResolvedValue([
       {
         nodeId: "node-1",
@@ -237,11 +237,15 @@ describe("browser tool snapshot maxChars", () => {
     const tool = createBrowserTool();
     await tool.execute?.(null, { action: "status", profile: "chrome" });
 
-    expect(browserClientMocks.browserStatus).toHaveBeenCalledWith(
-      undefined,
-      expect.objectContaining({ profile: "chrome" }),
+    expect(gatewayMocks.callGatewayTool).toHaveBeenCalledWith(
+      "node.invoke",
+      expect.any(Object),
+      expect.objectContaining({
+        nodeId: "node-1",
+        command: "browser.proxy",
+      }),
     );
-    expect(gatewayMocks.callGatewayTool).not.toHaveBeenCalled();
+    expect(browserClientMocks.browserStatus).not.toHaveBeenCalled();
   });
 });
 
