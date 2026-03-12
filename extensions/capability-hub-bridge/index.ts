@@ -148,14 +148,17 @@ export default function register(api: OpenClawPluginApi) {
             },
           },
           required: ["tool_name"],
-          additionalProperties: false,
+          additionalProperties: true,
         },
         async execute(
           _id: string,
           args: Record<string, unknown>
         ) {
           const toolName = args.tool_name as string;
-          const params = (args.params as Record<string, unknown>) || {};
+          // Support nested (params/input) and flat-style parameters
+          const { tool_name: _, params: explicitParams, input: explicitInput, ...rest } = args;
+          const nested = (explicitParams ?? explicitInput) as Record<string, unknown> | undefined;
+          const params = nested || (Object.keys(rest).length > 0 ? rest : {});
 
           try {
             // Lazy-load capabilities
