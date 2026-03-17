@@ -371,3 +371,8 @@ export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 // Media utilities
 export { loadWebMedia, type WebMediaResult } from "../web/media.js";
+
+// Agent event APIs — only read/subscribe APIs are exposed to extensions;
+// emitAgentEvent and registerAgentRunContext are internal-only.
+export { onAgentEvent, getAgentRunContext } from "../infra/agent-events.js";
+export type { AgentRunContext, AgentEventPayload } from "../infra/agent-events.js";
