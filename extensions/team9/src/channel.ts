@@ -29,6 +29,7 @@ import { uploadMediaToTeam9 } from "./media.js";
 import { createTeam9MonitorContext } from "./monitor/context.js";
 import type { Team9MonitorContext } from "./monitor/context.js";
 import { createTeam9MessageHandler } from "./monitor/message-handler.js";
+import { startTaskBridge } from "./task-bridge.js";
 
 // Store active connections per account (with monitor context)
 const activeConnections = new Map<
@@ -39,6 +40,9 @@ const activeConnections = new Map<
     monitorCtx: Team9MonitorContext;
   }
 >();
+
+// Task bridge cleanup handle (initialized once on first account start)
+let taskBridgeCleanup: (() => void) | null = null;
 
 // ==================== Connection Watchdog ====================
 
@@ -570,6 +574,12 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
 
       try {
         await getConnection(account, cfg);
+
+        // Start task bridge once (first account to start)
+        if (!taskBridgeCleanup && account.token && account.baseUrl) {
+          taskBridgeCleanup = startTaskBridge(account.baseUrl, account.token);
+        }
+
         console.log(`[Team9] Account ${account.accountId} started successfully`);
       } catch (error) {
         console.error(
@@ -589,9 +599,13 @@ export const team9Plugin: ChannelPlugin<ResolvedTeam9Account> = {
         console.log(`[Team9] Account ${account.accountId} stopped`);
       }
 
-      // Stop the watchdog when no connections remain
+      // Stop the watchdog and task bridge when no connections remain
       if (activeConnections.size === 0) {
         stopWatchdog();
+        if (taskBridgeCleanup) {
+          taskBridgeCleanup();
+          taskBridgeCleanup = null;
+        }
       }
     },
   },
