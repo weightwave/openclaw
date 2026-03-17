@@ -30,6 +30,9 @@ import { applyHookMappings } from "./hooks-mapping.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
+import { handleExecuteHttpRequest } from "./execute-http.js";
+import { handleStopHttpRequest } from "./stop-http.js";
+import { startActiveRunsSweep } from "./active-runs.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 
@@ -223,6 +226,8 @@ export function createGatewayHttpServer(opts: {
     handlePluginRequest,
     resolvedAuth,
   } = opts;
+  startActiveRunsSweep();
+
   const httpServer: HttpServer = opts.tlsOptions
     ? createHttpsServer(opts.tlsOptions, (req, res) => {
         void handleRequest(req, res);
@@ -248,6 +253,11 @@ export function createGatewayHttpServer(opts: {
         return;
       if (await handleSlackHttpRequest(req, res)) return;
       if (handlePluginRequest && (await handlePluginRequest(req, res))) return;
+
+      // Task execute/stop endpoints
+      if (await handleExecuteHttpRequest(req, res, { auth: resolvedAuth, trustedProxies })) return;
+      if (await handleStopHttpRequest(req, res, { auth: resolvedAuth, trustedProxies })) return;
+
       if (openResponsesEnabled) {
         if (
           await handleOpenResponsesHttpRequest(req, res, {
