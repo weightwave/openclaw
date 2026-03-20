@@ -7,7 +7,6 @@
 
 import {
   onAgentEvent,
-  getAgentRunContext,
   type AgentEventPayload,
 } from "openclaw/plugin-sdk";
 
@@ -96,7 +95,7 @@ function handleTaskEvent(
     }
 
     if (phase === "end") {
-      void callBotApiWithRetry(baseUrl, token, "PATCH", `/${taskId}/status`, {
+      void callBotApiWithRetry(baseUrl, token, "PATCH", `/${taskId}/executions/${state.executionId}/status`, {
         status: "completed",
       });
       runStates.delete(runId);
@@ -111,7 +110,7 @@ function handleTaskEvent(
             ? data.message
             : "Agent execution failed";
 
-      void callBotApiWithRetry(baseUrl, token, "PATCH", `/${taskId}/status`, {
+      void callBotApiWithRetry(baseUrl, token, "PATCH", `/${taskId}/executions/${state.executionId}/status`, {
         status: "failed",
         error: { message: errorMessage },
       });
@@ -121,12 +120,12 @@ function handleTaskEvent(
   }
 
   if (stream === "tool") {
-    if (phase === "invoke") {
-      const toolName = (data?.tool as string) || (data?.name as string) || "tool";
+    if (phase === "start") {
+      const toolName = (data?.name as string) || "tool";
       state.stepIndex += 1;
       state.currentToolName = toolName;
 
-      void callBotApi(baseUrl, token, "POST", `/${taskId}/steps`, {
+      void callBotApi(baseUrl, token, "POST", `/${taskId}/executions/${state.executionId}/steps`, {
         steps: [
           {
             orderIndex: state.stepIndex,
@@ -140,9 +139,9 @@ function handleTaskEvent(
 
     if (phase === "result") {
       const toolName = state.currentToolName || "tool";
-      const failed = data?.error != null;
+      const failed = data?.isError === true;
 
-      void callBotApi(baseUrl, token, "POST", `/${taskId}/steps`, {
+      void callBotApi(baseUrl, token, "POST", `/${taskId}/executions/${state.executionId}/steps`, {
         steps: [
           {
             orderIndex: state.stepIndex,
@@ -161,13 +160,13 @@ export function startTaskBridge(baseUrl: string, token: string): () => void {
   const runStates = new Map<string, TaskRunState>();
 
   const unsubscribe = onAgentEvent((event: AgentEventPayload) => {
-    const ctx = getAgentRunContext(event.runId);
-    if (!ctx?.metadata) return;
-    if (ctx.metadata.source !== "team9-task") return;
+    const metadata = event.metadata;
+    if (!metadata) return;
+    if (metadata.source !== "team9-task") return;
 
     handleTaskEvent(
       runStates,
-      ctx.metadata as TaskMetadata,
+      metadata as TaskMetadata,
       event,
       baseUrl,
       token,

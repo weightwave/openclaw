@@ -9,6 +9,7 @@ export type AgentEventPayload = {
   ts: number;
   data: Record<string, unknown>;
   sessionKey?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type AgentRunContext = {
@@ -18,16 +19,40 @@ export type AgentRunContext = {
   metadata?: Record<string, unknown>;
 };
 
-// Keep per-run counters so streams stay strictly monotonic per runId.
-const seqByRun = new Map<string, number>();
-const listeners = new Set<(evt: AgentEventPayload) => void>();
-const runContextById = new Map<string, AgentRunContext>();
+// ── Shared state (globalThis singleton) ──────────────────────────────
+// Uses Symbol.for() so that both Node.js ESM and jiti loaders resolve
+// to the exact same state object, preventing duplicate listener sets.
+// Same pattern as plugins/runtime.ts (line 19).
+
+const AGENT_EVENTS_STATE = Symbol.for("openclaw.agentEventsState.v1");
+
+type AgentEventsState = {
+  seqByRun: Map<string, number>;
+  listeners: Set<(evt: AgentEventPayload) => void>;
+  runContextById: Map<string, AgentRunContext>;
+};
+
+const state: AgentEventsState = (() => {
+  const g = globalThis as typeof globalThis & {
+    [AGENT_EVENTS_STATE]?: AgentEventsState;
+  };
+  if (!g[AGENT_EVENTS_STATE]) {
+    g[AGENT_EVENTS_STATE] = {
+      seqByRun: new Map(),
+      listeners: new Set(),
+      runContextById: new Map(),
+    };
+  }
+  return g[AGENT_EVENTS_STATE];
+})();
+
+// ── Public API (unchanged) ───────────────────────────────────────────
 
 export function registerAgentRunContext(runId: string, context: AgentRunContext) {
   if (!runId) return;
-  const existing = runContextById.get(runId);
+  const existing = state.runContextById.get(runId);
   if (!existing) {
-    runContextById.set(runId, { ...context });
+    state.runContextById.set(runId, { ...context });
     return;
   }
   if (context.sessionKey && existing.sessionKey !== context.sessionKey) {
@@ -43,21 +68,27 @@ export function registerAgentRunContext(runId: string, context: AgentRunContext)
 }
 
 export function getAgentRunContext(runId: string) {
-  return runContextById.get(runId);
+  return state.runContextById.get(runId);
 }
 
 export function clearAgentRunContext(runId: string) {
-  runContextById.delete(runId);
+  state.runContextById.delete(runId);
 }
 
+/**
+ * Reset all shared state for testing. Clears seqByRun, listeners, and
+ * runContextById so tests don't leak state across cases.
+ */
 export function resetAgentRunContextForTest() {
-  runContextById.clear();
+  state.seqByRun.clear();
+  state.listeners.clear();
+  state.runContextById.clear();
 }
 
 export function emitAgentEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
-  const nextSeq = (seqByRun.get(event.runId) ?? 0) + 1;
-  seqByRun.set(event.runId, nextSeq);
-  const context = runContextById.get(event.runId);
+  const nextSeq = (state.seqByRun.get(event.runId) ?? 0) + 1;
+  state.seqByRun.set(event.runId, nextSeq);
+  const context = state.runContextById.get(event.runId);
   const sessionKey =
     typeof event.sessionKey === "string" && event.sessionKey.trim()
       ? event.sessionKey
@@ -65,10 +96,11 @@ export function emitAgentEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
   const enriched: AgentEventPayload = {
     ...event,
     sessionKey,
+    metadata: context?.metadata,
     seq: nextSeq,
     ts: Date.now(),
   };
-  for (const listener of listeners) {
+  for (const listener of state.listeners) {
     try {
       listener(enriched);
     } catch {
@@ -78,6 +110,6 @@ export function emitAgentEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
 }
 
 export function onAgentEvent(listener: (evt: AgentEventPayload) => void) {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+  state.listeners.add(listener);
+  return () => state.listeners.delete(listener);
 }
